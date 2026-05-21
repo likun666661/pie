@@ -129,6 +129,31 @@ impl Flow {
         Ok((code, state))
     }
 
+    /// Exchange a refresh_token for a fresh access token. Provider-agnostic — uses
+    /// `grant_type=refresh_token`. Returns the new TokenResponse; callers persist the
+    /// updated access_token (and refresh_token, if rotated) to the auth store.
+    pub async fn refresh_token(&self, refresh_token: &str) -> Result<TokenResponse> {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()?;
+        let form = [
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token),
+            ("client_id", &self.client_id),
+        ];
+        let resp = client.post(&self.token_url).form(&form).send().await?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            return Err(anyhow!(
+                "refresh endpoint {status}: {}",
+                text.chars().take(500).collect::<String>()
+            ));
+        }
+        let parsed: TokenResponse = serde_json::from_str(&text)?;
+        Ok(parsed)
+    }
+
     /// Exchange the auth code + PKCE verifier for an access token.
     pub async fn exchange_code(&self, code: &str, verifier: &str) -> Result<TokenResponse> {
         let client = reqwest::Client::builder()

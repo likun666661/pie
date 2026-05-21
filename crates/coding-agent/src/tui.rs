@@ -67,6 +67,9 @@ impl Tui {
         println!("type a message and press Enter. Ctrl-C to quit.\n");
     }
 
+    /// Legacy prompt marker. rustyline now renders the prompt directly, but the method is
+    /// kept available for tests + non-rustyline embedders.
+    #[allow(dead_code)]
     pub fn user_prompt_marker(&self) {
         let mut out = std::io::stdout();
         let _ = out.execute(SetForegroundColor(Color::Cyan));

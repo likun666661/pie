@@ -34,7 +34,13 @@ mod tui;
 use std::io::Write as _;
 use std::time::{Duration, Instant};
 
-use tokio::io::AsyncBufReadExt as _;
+/// Result of one rustyline readline call. Mapped from rustyline errors so the async REPL
+/// can dispatch on three clean cases.
+enum ReadlineOutcome {
+    Line(String),
+    CtrlC,
+    Eof,
+}
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -322,22 +328,52 @@ async fn run_repl(mut cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo)
     // submission appends + persists.
     let mut history = history::HistoryStore::load();
 
-    // REPL — async stdin so we can race a Ctrl-C abort against the in-flight prompt.
-    let mut stdin = tokio::io::BufReader::new(tokio::io::stdin()).lines();
+    // Use rustyline for the readline phase — gives us proper unicode-width-aware editing
+    // (CJK chars correctly consume one logical character per backspace), ↑/↓ recall,
+    // Ctrl-R reverse search, and emacs keybinds. The line read is blocking so we run it
+    // on a tokio blocking-thread.
+    let history_path = history::HistoryStore::default_path();
     let mut last_idle_ctrlc: Option<Instant> = None;
 
     loop {
-        tui.user_prompt_marker();
+        // Each iteration spawns a fresh editor. Cheap and avoids cross-iteration borrow
+        // issues with the blocking task. The editor loads existing history on construction.
+        let prompt_marker = "you> ".to_string();
+        let history_path_clone = history_path.clone();
+        let read =
+            tokio::task::spawn_blocking(move || -> Result<ReadlineOutcome, anyhow::Error> {
+                let mut editor = rustyline::DefaultEditor::new()?;
+                if history_path_clone.exists() {
+                    let _ = editor.load_history(&history_path_clone);
+                }
+                match editor.readline(&format!("\x1b[36m{prompt_marker}\x1b[0m")) {
+                    Ok(line) => Ok(ReadlineOutcome::Line(line)),
+                    Err(rustyline::error::ReadlineError::Interrupted) => Ok(ReadlineOutcome::CtrlC),
+                    Err(rustyline::error::ReadlineError::Eof) => Ok(ReadlineOutcome::Eof),
+                    Err(e) => Err(e.into()),
+                }
+            })
+            .await;
 
-        // Idle read with double-Ctrl-C-to-exit semantics. tokio's ctrl_c() yields each time a
-        // SIGINT arrives — so awaiting it once gets the next signal cleanly.
-        let line = tokio::select! {
-            line = stdin.next_line() => match line {
-                Ok(Some(l)) => l,
-                Ok(None) => { tui.system_line("eof — exiting"); break; }
-                Err(e) => { tui.error_line(&format!("{e}")); break; }
-            },
-            _ = tokio::signal::ctrl_c() => {
+        let outcome = match read {
+            Ok(Ok(o)) => o,
+            Ok(Err(e)) => {
+                tui.error_line(&format!("readline: {e}"));
+                break;
+            }
+            Err(e) => {
+                tui.error_line(&format!("readline task: {e}"));
+                break;
+            }
+        };
+
+        let line = match outcome {
+            ReadlineOutcome::Line(l) => l,
+            ReadlineOutcome::Eof => {
+                tui.system_line("eof — exiting");
+                break;
+            }
+            ReadlineOutcome::CtrlC => {
                 let now = Instant::now();
                 if last_idle_ctrlc
                     .map(|t| now.duration_since(t) < Duration::from_millis(1500))

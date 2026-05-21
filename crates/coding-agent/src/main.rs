@@ -10,6 +10,7 @@ mod bug_report;
 mod commands;
 mod config;
 mod export;
+mod images;
 mod logging;
 mod mentions;
 mod model;
@@ -66,6 +67,10 @@ struct Cli {
     /// Delete a session by id and exit.
     #[arg(long, value_name = "ID")]
     delete_session: Option<String>,
+    /// Attach an image to the first prompt of this session. Repeatable. Supported formats:
+    /// PNG, JPEG, WebP, GIF. Each image is capped at 10 MiB; max 10 per message.
+    #[arg(long = "image", value_name = "PATH")]
+    image: Vec<std::path::PathBuf>,
 }
 
 #[tokio::main]
@@ -109,7 +114,7 @@ async fn delete_session_cmd(repo: &JsonlSessionRepo, id: &str) -> Result<()> {
     Ok(())
 }
 
-async fn run_repl(cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo) -> Result<()> {
+async fn run_repl(mut cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo) -> Result<()> {
     let model = model::auto_detect_model(cli.provider.as_deref(), cli.model.as_deref())?;
     let thinking = parse_thinking(&cli.thinking)?;
 
@@ -294,12 +299,41 @@ async fn run_repl(cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo) -> 
         // user's text; the file content is prepended in a small attachment block.
         let (expanded, _resolved) = mentions::expand(input, &cwd).await;
 
+        // Attach `--image` payloads to the first prompt only (issue #16 first slice).
+        // Subsequent prompts in the same session can mention files via @path or re-launch
+        // the binary with --image again.
+        let pending_images = if !cli.image.is_empty() {
+            match images::load_all(&cli.image).await {
+                Ok(imgs) => imgs,
+                Err(e) => {
+                    tui.error_line(&format!("--image: {e}"));
+                    cli.image.clear();
+                    Vec::new()
+                }
+            }
+        } else {
+            Vec::new()
+        };
+        let has_images = !pending_images.is_empty();
+        if has_images {
+            cli.image.clear();
+        }
+
         // Run the prompt while watching for Ctrl-C. On signal, ask the harness to abort and
         // keep awaiting the future so it cleans up; the result tells us whether it aborted.
         let aborted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let aborted_for_signal = aborted.clone();
         let harness_for_signal = harness.clone();
-        let prompt_fut = session_runner.prompt(expanded);
+        // First-time image attachment goes through harness.prompt_with_images directly; the
+        // session_runner retry/rewind path doesn't need to participate for a one-shot
+        // describe-this-image flow.
+        let prompt_fut = async {
+            if has_images {
+                harness.prompt_with_images(expanded, pending_images).await
+            } else {
+                session_runner.prompt(expanded).await
+            }
+        };
         tokio::pin!(prompt_fut);
         let signal_fut = async move {
             // First Ctrl-C while a prompt is in flight: abort.

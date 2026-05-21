@@ -68,12 +68,6 @@ cargo fmt --all --check
 | `~/.pie/memory/*.md`                        | Cross-session memory (auto-injected into system prompt) |
 | `$PIE_DIR`                                  | Override the base directory |
 
-## Deliberately out of scope (vs the TS reference)
-
-Extensions / skills loader / themes / settings-manager / keybindings; print/json/rpc modes; SDK
-as a library; `/login` + auth-storage; export-html; `pi packages`; image generation; the full
-TUI (no editor/autocomplete/fuzzy/kill-ring/undo/terminal-image — we use crossterm directly).
-
 ## CI / Release
 
 | Workflow | Trigger | Job |

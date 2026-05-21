@@ -3,7 +3,7 @@ name = "pie-coding-agent"
 version = "0.75.0"
 edition = "2024"
 rust-version = "1.85"
-description = "Minimal coding agent CLI on top of pie-agent-core — REPL TUI, 4 tools (read/write/bash/ls), jsonl sessions with --resume, cross-session memory."
+description = "Minimal coding agent CLI on top of pie-agent-core — REPL TUI, built-in filesystem + shell tools, jsonl sessions with --resume, cross-session memory."
 license = "MIT"
 authors = ["earendil-works"]
 

@@ -32,16 +32,9 @@ pub async fn resume(repo: &JsonlSessionRepo, explicit_id: Option<&str>) -> Resul
         bail!("no sessions to resume in {}", repo.root().display());
     }
     let chosen = if let Some(id) = explicit_id {
-        files
-            .iter()
-            .find(|p| {
-                p.file_stem()
-                    .and_then(|s| s.to_str())
-                    .map(|s| s == id || s.starts_with(id))
-                    .unwrap_or(false)
-            })
+        find_session_path(repo, &files, id)
+            .await?
             .with_context(|| format!("no session matches id {id}"))?
-            .clone()
     } else {
         // JsonlSessionRepo::list() sorts ascending by name (UUIDv7), so the tail is newest.
         files.last().cloned().unwrap()
@@ -109,12 +102,92 @@ async fn first_user_text(session: &Session) -> Option<String> {
 
 /// Delete a session by id (full UUIDv7) or a unique prefix.
 pub async fn delete_by_id(repo: &JsonlSessionRepo, id: &str) -> Result<PathBuf> {
-    for path in repo.list().await? {
+    let files = repo.list().await?;
+    let path = find_session_path(repo, &files, id)
+        .await?
+        .with_context(|| format!("no session matches id {id}"))?;
+    repo.delete(&path).await?;
+    Ok(path)
+}
+
+async fn find_session_path(
+    repo: &JsonlSessionRepo,
+    files: &[PathBuf],
+    id: &str,
+) -> Result<Option<PathBuf>> {
+    for path in files {
         let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
         if stem == id || stem.starts_with(id) {
-            repo.delete(&path).await?;
-            return Ok(path);
+            return Ok(Some(path.clone()));
+        }
+
+        let session = repo.open(path).await?;
+        let metadata_id = session
+            .storage()
+            .get_metadata_json()
+            .await?
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        if metadata_id
+            .as_deref()
+            .map(|s| s == id || s.starts_with(id))
+            .unwrap_or(false)
+        {
+            return Ok(Some(path.clone()));
         }
     }
-    bail!("no session matches id {id}");
+    Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn resume_matches_legacy_metadata_id_when_file_stem_differs() {
+        let dir = tempdir().unwrap();
+        let repo = JsonlSessionRepo::new(dir.path());
+        let path = dir.path().join("file-id.jsonl");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "id": "metadata-id",
+                "createdAt": "2026-01-01T00:00:00Z",
+                "cwd": "/cwd",
+                "path": path.to_string_lossy(),
+            })
+            .to_string()
+                + "\n",
+        )
+        .unwrap();
+
+        let session = resume(&repo, Some("metadata")).await.unwrap();
+        let meta = session.storage().get_metadata_json().await.unwrap();
+        assert_eq!(meta.get("id").and_then(|v| v.as_str()), Some("metadata-id"));
+    }
+
+    #[tokio::test]
+    async fn delete_matches_legacy_metadata_id_when_file_stem_differs() {
+        let dir = tempdir().unwrap();
+        let repo = JsonlSessionRepo::new(dir.path());
+        let path = dir.path().join("file-id.jsonl");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "id": "metadata-id",
+                "createdAt": "2026-01-01T00:00:00Z",
+                "cwd": "/cwd",
+                "path": path.to_string_lossy(),
+            })
+            .to_string()
+                + "\n",
+        )
+        .unwrap();
+
+        let deleted = delete_by_id(&repo, "metadata").await.unwrap();
+        assert_eq!(deleted, path);
+        assert!(!deleted.exists());
+    }
 }

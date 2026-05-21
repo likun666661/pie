@@ -4,8 +4,8 @@
 use std::sync::Arc;
 
 use pie_agent_core::{
-    AgentHarness, AgentHarnessOptions, MemorySessionStorage, Session, SessionStorage, Skill,
-    StreamFn, ThinkingLevel,
+    AgentHarness, AgentHarnessOptions, AgentMessage, MemorySessionStorage, Session, SessionError,
+    SessionErrorCode, SessionStorage, SessionTreeEntry, Skill, StreamFn, ThinkingLevel,
 };
 use pie_ai::{
     AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream, AssistantRole,
@@ -60,6 +60,14 @@ fn faux_stream_fn(text: &'static str) -> StreamFn {
     })
 }
 
+fn user_message(text: &str) -> AgentMessage {
+    AgentMessage::Llm(pie_ai::Message::User(pie_ai::UserMessage {
+        role: pie_ai::UserRole::User,
+        content: pie_ai::UserContent::Text(text.into()),
+        timestamp: chrono::Utc::now().timestamp_millis(),
+    }))
+}
+
 #[tokio::test]
 async fn prompt_persists_user_and_assistant_to_session() {
     let storage = Arc::new(MemorySessionStorage::new());
@@ -90,6 +98,83 @@ async fn prompt_persists_user_and_assistant_to_session() {
         )
     });
     assert!(has_assistant);
+}
+
+#[tokio::test]
+async fn prompt_reports_session_persistence_failures() {
+    struct FailingAppendStorage;
+
+    #[async_trait::async_trait]
+    impl SessionStorage for FailingAppendStorage {
+        async fn get_metadata_json(&self) -> Result<serde_json::Value, SessionError> {
+            Ok(serde_json::json!({"id": "fail", "createdAt": "now"}))
+        }
+        async fn get_leaf_id(&self) -> Result<Option<String>, SessionError> {
+            Ok(None)
+        }
+        async fn set_leaf_id(&self, _id: Option<String>) -> Result<(), SessionError> {
+            Ok(())
+        }
+        async fn create_entry_id(&self) -> Result<String, SessionError> {
+            Ok("entry".into())
+        }
+        async fn append_entry(&self, _entry: SessionTreeEntry) -> Result<(), SessionError> {
+            Err(SessionError {
+                code: SessionErrorCode::StorageFailure,
+                message: "disk full".into(),
+            })
+        }
+        async fn get_entry(&self, _id: &str) -> Result<Option<SessionTreeEntry>, SessionError> {
+            Ok(None)
+        }
+        async fn get_entries(&self) -> Result<Vec<SessionTreeEntry>, SessionError> {
+            Ok(Vec::new())
+        }
+        async fn get_path_to_root(
+            &self,
+            _leaf_id: Option<&str>,
+        ) -> Result<Vec<SessionTreeEntry>, SessionError> {
+            Ok(Vec::new())
+        }
+        async fn find_entries(
+            &self,
+            _entry_type: &str,
+        ) -> Result<Vec<SessionTreeEntry>, SessionError> {
+            Ok(Vec::new())
+        }
+        async fn get_label(&self, _id: &str) -> Result<Option<String>, SessionError> {
+            Ok(None)
+        }
+    }
+
+    let session = Session::new(Arc::new(FailingAppendStorage) as Arc<dyn SessionStorage>);
+    let mut opts = AgentHarnessOptions::new(faux_model(), session);
+    opts.stream_fn = Some(faux_stream_fn("ok"));
+    let harness = AgentHarness::new(opts);
+
+    let err = harness.prompt("hi").await.unwrap_err().to_string();
+    assert!(err.contains("session append message"));
+    assert!(err.contains("disk full"));
+}
+
+#[tokio::test]
+async fn move_to_rehydrates_thinking_level_from_session_context() {
+    let storage = Arc::new(MemorySessionStorage::new());
+    let session = Session::new(storage as Arc<dyn SessionStorage>);
+    session.append_thinking_level_change("high").await.unwrap();
+    let msg_id = session.append_message(user_message("hi")).await.unwrap();
+
+    let mut opts = AgentHarnessOptions::new(faux_model(), session.clone());
+    opts.thinking_level = ThinkingLevel::Off;
+    opts.stream_fn = Some(faux_stream_fn("ok"));
+    let harness = AgentHarness::new(opts);
+
+    harness.move_to(Some(&msg_id), None).await.unwrap();
+
+    assert_eq!(
+        harness.agent().state().thinking_level,
+        Some(ThinkingLevel::High)
+    );
 }
 
 #[tokio::test]
@@ -178,4 +263,46 @@ async fn prompt_from_template_interpolates_and_runs() {
         "expected interpolated user message; entries={:#?}",
         entries
     );
+}
+
+#[tokio::test]
+async fn rehydrate_from_session_restores_messages_model_thinking() {
+    use pie_agent_core::{AgentMessage, ThinkingLevel};
+
+    let storage = Arc::new(MemorySessionStorage::new());
+    let session = Session::new(storage as Arc<dyn SessionStorage>);
+
+    // Seed the session with a thinking-level change, a model change, and one user message —
+    // simulating an earlier session the next harness is meant to pick up.
+    session.append_thinking_level_change("high").await.unwrap();
+    session.append_model_change("faux", "faux").await.unwrap();
+    session
+        .append_message(AgentMessage::Llm(pie_ai::Message::User(
+            pie_ai::UserMessage {
+                role: pie_ai::UserRole::User,
+                content: pie_ai::UserContent::Text("earlier user prompt".into()),
+                timestamp: 0,
+            },
+        )))
+        .await
+        .unwrap();
+
+    // Build a harness whose initial state has *neither* the seeded model nor the high thinking
+    // level — rehydrate must overwrite both.
+    let cold_model = faux_model();
+    let mut opts = AgentHarnessOptions::new(cold_model.clone(), session.clone());
+    opts.thinking_level = ThinkingLevel::Off;
+    opts.stream_fn = Some(faux_stream_fn("ok"));
+    let harness = AgentHarness::new(opts);
+
+    let ctx = harness.rehydrate_from_session().await.unwrap();
+    assert_eq!(ctx.thinking_level, "high");
+    assert_eq!(ctx.model.as_ref().unwrap().model_id, "faux");
+
+    let state = harness.agent().state();
+    assert_eq!(state.messages.len(), 1);
+    assert_eq!(state.thinking_level, Some(ThinkingLevel::High));
+    // Model is restored only when the catalog has the (provider, id) pair. The faux model is
+    // not in the catalog, so we just check the API didn't blow away the cold-start model.
+    assert!(state.model.is_some());
 }

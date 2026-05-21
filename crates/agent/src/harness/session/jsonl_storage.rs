@@ -37,9 +37,15 @@ impl JsonlSessionStorage {
                 message: format!("{} already exists", path.display()),
             });
         }
+        let id = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(uuidv7);
         let metadata = JsonlSessionMetadata {
             base: SessionMetadata {
-                id: uuidv7(),
+                id,
                 created_at: chrono::Utc::now().to_rfc3339(),
             },
             cwd: cwd.into(),
@@ -115,21 +121,21 @@ impl JsonlSessionStorage {
     }
 
     async fn current_leaf(&self) -> Result<Option<String>, SessionError> {
-        // Find the latest `leaf` entry; fall back to the last non-leaf entry's id; else None.
+        // Replay the append-only log. A `leaf` entry explicitly moves the pointer, while any
+        // normal appended entry becomes the new leaf for subsequent writes.
         let entries = self.load_entries().await?;
-        let mut explicit: Option<String> = None;
-        let mut last_non_leaf: Option<String> = None;
+        let mut leaf: Option<String> = None;
         for entry in &entries {
             match entry {
                 SessionTreeEntry::Leaf { target_id, .. } => {
-                    explicit = target_id.clone();
+                    leaf = target_id.clone();
                 }
                 _ => {
-                    last_non_leaf = Some(entry.id().to_string());
+                    leaf = Some(entry.id().to_string());
                 }
             }
         }
-        Ok(explicit.or(last_non_leaf))
+        Ok(leaf)
     }
 }
 

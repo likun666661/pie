@@ -36,7 +36,16 @@ impl Tui {
         }
     }
 
-    pub fn banner(&self, model: &pie_ai::Model, session_id: &str, resumed: bool) {
+    /// Render the startup banner. `tool_names` comes from the registered tool definitions so
+    /// adding/removing a tool in `tools::default_tools()` flows through here automatically — no
+    /// hand-edited literal list to drift out of sync.
+    pub fn banner(
+        &self,
+        model: &pie_ai::Model,
+        session_id: &str,
+        resumed: bool,
+        tool_names: &[String],
+    ) {
         let mut out = std::io::stdout();
         let _ = out.execute(SetForegroundColor(Color::Magenta));
         let _ = out.execute(Print("──────── pie-coding-agent ────────\n"));
@@ -49,7 +58,12 @@ impl Tui {
             "session: {session_id}{}",
             if resumed { "  [resumed]" } else { "" }
         );
-        println!("tools:   read, write, bash, ls, memory");
+        let tools = if tool_names.is_empty() {
+            "(none)".to_string()
+        } else {
+            tool_names.join(", ")
+        };
+        println!("tools:   {tools}");
         println!("type a message and press Enter. Ctrl-C to quit.\n");
     }
 

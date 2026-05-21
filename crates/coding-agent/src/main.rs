@@ -1,9 +1,9 @@
 //! pie-coding-agent — minimal coding agent CLI on top of pie-agent-core.
 //!
 //! Modeled on `packages/coding-agent/` (the TS implementation) in spirit: same tools
-//! (`read`/`write`/`bash`/`ls` + `memory`), same `--resume` semantics scoped by cwd hash, same
-//! "interactive TUI" mode. Trimmed scope: no extensions, no skills loader, no themes, no
-//! print/rpc/json modes.
+//! (`read`/`write`/`edit`/`bash`/`ls`/`grep`/`find` + `memory`), same `--resume` semantics
+//! scoped by cwd hash, same "interactive TUI" mode. Trimmed scope: no extensions, no skills
+//! loader, no themes, no print/rpc/json modes.
 
 mod agent_session;
 mod config;
@@ -14,10 +14,11 @@ mod tui;
 
 use std::io::{BufRead as _, Write as _};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::Parser;
 use pie_agent_core::{
-    AgentHarness, AgentHarnessOptions, AgentMessage, JsonlSessionRepo, Session, ThinkingLevel,
+    AgentHarness, AgentHarnessOptions, AgentMessage, JsonlSessionRepo, SessionContext,
+    ThinkingLevel,
 };
 use pie_ai::Message as PiMessage;
 
@@ -118,8 +119,12 @@ async fn run_repl(cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo) -> 
     // Build the harness.
     let memory_dir = config::memory_dir();
     let tools = tools::default_tools(memory_dir.clone());
+    let tool_names = tools
+        .iter()
+        .map(|tool| tool.definition().name.clone())
+        .collect::<Vec<_>>();
     let memory_block = tools::memory::load_memory_block(&memory_dir).await;
-    let system_prompt = compose_system_prompt(&cwd, &memory_block);
+    let system_prompt = compose_system_prompt(&cwd, &memory_block, &tool_names);
 
     let mut opts = AgentHarnessOptions::new(model.clone(), session.clone());
     opts.system_prompt = system_prompt;
@@ -129,11 +134,23 @@ async fn run_repl(cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo) -> 
     let session_runner =
         agent_session::AgentSession::new(harness.clone(), agent_session::RetrySettings::default());
 
-    // Banner + replay (if --resume).
+    // Banner + replay (if --resume). All resume hydration lives on AgentHarness, so the CLI
+    // just asks for the rebuilt SessionContext and renders it.
     let tui = tui::Tui::new();
-    tui.banner(&model, &session_id, resumed);
-    if resumed {
-        replay_transcript(&session, &harness, &tui).await?;
+    let replay_context = if resumed {
+        Some(harness.rehydrate_from_session().await?)
+    } else {
+        None
+    };
+    let display_model = harness
+        .agent()
+        .state()
+        .model
+        .clone()
+        .unwrap_or_else(|| model.clone());
+    tui.banner(&display_model, &session_id, resumed, &tool_names);
+    if let Some(ctx) = replay_context.as_ref() {
+        replay_transcript(ctx, &tui);
     }
 
     // Wire the TUI listener so each prompt's events stream live.
@@ -185,20 +202,12 @@ fn print_help() {
 }
 
 fn parse_thinking(s: &str) -> Result<ThinkingLevel> {
-    Ok(match s {
-        "off" => ThinkingLevel::Off,
-        "minimal" => ThinkingLevel::Minimal,
-        "low" => ThinkingLevel::Low,
-        "medium" => ThinkingLevel::Medium,
-        "high" => ThinkingLevel::High,
-        "xhigh" => ThinkingLevel::Xhigh,
-        other => bail!("invalid thinking level: {other}"),
-    })
+    s.parse().map_err(anyhow::Error::msg)
 }
 
-fn compose_system_prompt(cwd: &std::path::Path, memory: &str) -> String {
+fn compose_system_prompt(cwd: &std::path::Path, memory: &str, tool_names: &[String]) -> String {
     let mut s = String::new();
-    s.push_str(BASE_PROMPT);
+    s.push_str(&render_base_prompt(tool_names));
     s.push_str("\n\n");
     s.push_str(&format!("Current working directory: {}\n", cwd.display()));
     if !memory.is_empty() {
@@ -209,37 +218,36 @@ fn compose_system_prompt(cwd: &std::path::Path, memory: &str) -> String {
     s
 }
 
-const BASE_PROMPT: &str = "You are pie-coding-agent, a minimal coding assistant running in a terminal. You have access to filesystem and shell tools (read, write, bash, ls) plus a persistent cross-session memory tool. \
-Prefer running a tool over guessing. When making file changes, use `read` first to confirm current contents, then `write`. Keep responses concise.";
+/// Build the prompt header. The tool inventory is rendered from the actual registered tool
+/// definitions so adding/removing a tool in `tools::default_tools()` flows through here without
+/// a hand-edited literal list.
+fn render_base_prompt(tool_names: &[String]) -> String {
+    let inventory = if tool_names.is_empty() {
+        "no tools registered".to_string()
+    } else {
+        tool_names.join(", ")
+    };
+    format!(
+        "You are pie-coding-agent, a minimal coding assistant running in a terminal. \
+You have access to the following tools: {inventory}. \
+Prefer running a tool over guessing. When making file changes, read the file first to confirm the exact current contents, then edit or write. Keep responses concise."
+    )
+}
 
-/// Re-render a resumed session's transcript to stdout so the user sees the context they're
-/// continuing from. The harness's `state.messages` already contains the replayed transcript
-/// (we set it explicitly here from the session); we walk it for display.
-async fn replay_transcript(
-    session: &Session,
-    harness: &AgentHarness,
-    tui: &tui::Tui,
-) -> Result<()> {
-    let ctx = session.build_context().await?;
+fn replay_transcript(ctx: &SessionContext, tui: &tui::Tui) {
     if ctx.messages.is_empty() {
-        return Ok(());
+        return;
     }
     tui.system_line(&format!(
         "resumed — replaying {} messages",
         ctx.messages.len()
     ));
-    // Hydrate the Agent state so the next prompt continues from this transcript.
-    {
-        let mut state = harness.agent().state();
-        state.messages = ctx.messages.clone();
-    }
     for m in &ctx.messages {
         tui::render_persisted(m);
     }
     // Skip custom variants (compaction_summary etc.); they aren't model-visible here. But the
     // harness uses them via convert_to_llm filtering — that's already handled by pie-agent-core.
     drop_unused(&ctx.messages);
-    Ok(())
 }
 
 fn drop_unused(_: &[AgentMessage]) {}

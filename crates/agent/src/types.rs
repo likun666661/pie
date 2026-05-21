@@ -68,6 +68,17 @@ pub enum ThinkingLevel {
 }
 
 impl ThinkingLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Xhigh => "xhigh",
+        }
+    }
+
     /// Translate to the pie-ai `ThinkingLevel`. Returns `None` for `Off` since `pie-ai` has no
     /// off variant — callers should skip emitting reasoning when this is `None`.
     pub fn to_pie_ai(self) -> Option<pie_ai::ThinkingLevel> {
@@ -78,6 +89,22 @@ impl ThinkingLevel {
             Self::Medium => Some(pie_ai::ThinkingLevel::Medium),
             Self::High => Some(pie_ai::ThinkingLevel::High),
             Self::Xhigh => Some(pie_ai::ThinkingLevel::Xhigh),
+        }
+    }
+}
+
+impl std::str::FromStr for ThinkingLevel {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "off" => Ok(Self::Off),
+            "minimal" => Ok(Self::Minimal),
+            "low" => Ok(Self::Low),
+            "medium" => Ok(Self::Medium),
+            "high" => Ok(Self::High),
+            "xhigh" => Ok(Self::Xhigh),
+            other => Err(format!("invalid thinking level: {other}")),
         }
     }
 }

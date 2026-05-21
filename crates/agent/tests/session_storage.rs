@@ -60,6 +60,58 @@ async fn jsonl_session_persists_across_open() {
 }
 
 #[tokio::test]
+async fn jsonl_metadata_id_matches_session_file_stem() {
+    let dir = tempdir().unwrap();
+    let repo = JsonlSessionRepo::new(dir.path());
+
+    let session = repo.create("/some/cwd").await.unwrap();
+    let files = repo.list().await.unwrap();
+    let stem = files[0].file_stem().and_then(|s| s.to_str()).unwrap();
+    let meta = session.storage().get_metadata_json().await.unwrap();
+
+    assert_eq!(meta.get("id").and_then(|v| v.as_str()), Some(stem));
+}
+
+#[tokio::test]
+async fn jsonl_explicit_leaf_moves_are_overridden_by_new_entries() {
+    let dir = tempdir().unwrap();
+    let repo = JsonlSessionRepo::new(dir.path());
+
+    let session = repo.create("/some/cwd").await.unwrap();
+    let id_a = session.append_message(user_message("a")).await.unwrap();
+    let _id_b = session.append_message(user_message("b")).await.unwrap();
+
+    session.move_to(Some(&id_a), None).await.unwrap();
+    let id_c = session.append_message(user_message("c")).await.unwrap();
+
+    let files = repo.list().await.unwrap();
+    let reopened = repo.open(&files[0]).await.unwrap();
+    assert_eq!(
+        reopened.leaf_id().await.unwrap().as_deref(),
+        Some(id_c.as_str())
+    );
+
+    let branch = reopened.branch(None).await.unwrap();
+    let ids: Vec<&str> = branch.iter().map(|e| e.id()).collect();
+    assert_eq!(ids, vec![id_a.as_str(), id_c.as_str()]);
+}
+
+#[tokio::test]
+async fn jsonl_can_move_leaf_to_root() {
+    let dir = tempdir().unwrap();
+    let repo = JsonlSessionRepo::new(dir.path());
+
+    let session = repo.create("/some/cwd").await.unwrap();
+    session.append_message(user_message("a")).await.unwrap();
+    session.move_to(None, None).await.unwrap();
+
+    let files = repo.list().await.unwrap();
+    let reopened = repo.open(&files[0]).await.unwrap();
+    assert_eq!(reopened.leaf_id().await.unwrap(), None);
+    assert!(reopened.branch(None).await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn branch_walks_parent_chain_in_root_to_leaf_order() {
     let storage = Arc::new(MemorySessionStorage::new());
     let session = Session::new(storage as Arc<dyn SessionStorage>);

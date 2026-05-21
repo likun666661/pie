@@ -3,7 +3,8 @@
 //! `_prepareRetry`).
 //!
 //! On a retryable LLM error the wrapper:
-//! 1. Drops the failed assistant message from agent state (kept in session log).
+//! 1. Drops the failed assistant message from agent state and rewinds the active session leaf
+//!    while keeping the append-only session log intact.
 //! 2. Waits exponentially (`base_delay_ms * 2^(attempt-1)`, capped).
 //! 3. Calls `harness.continue_()` to re-run.
 //! 4. Up to `max_retries` times. After that, the error surfaces to the caller.
@@ -15,7 +16,9 @@
 use std::sync::Arc;
 
 use once_cell::sync::Lazy;
-use pie_agent_core::{AgentEvent, AgentHarness, AgentListener, AgentMessage, AgentRunError};
+use pie_agent_core::{
+    AgentEvent, AgentHarness, AgentListener, AgentMessage, AgentRunError, SessionTreeEntry,
+};
 use pie_ai::{AssistantMessage as PiAssistantMessage, Message as PiMessage};
 use regex::Regex;
 
@@ -77,7 +80,6 @@ impl AgentSession {
     /// errors with exponential backoff.
     pub async fn prompt(&self, text: impl Into<String>) -> Result<(), AgentRunError> {
         let text = text.into();
-        let mut last_err: Option<AgentRunError> = None;
         let mut attempt: u32 = 0;
         loop {
             let r = if attempt == 0 {
@@ -85,41 +87,22 @@ impl AgentSession {
             } else {
                 self.harness.continue_().await
             };
-            match r {
-                Ok(()) => {
-                    if !self.is_retryable_assistant(&self.last_assistant()) {
-                        return Ok(());
-                    }
-                    // Successful prompt() can still leave a synthesized error assistant message
-                    // (provider stream encoded the error). Re-evaluate via retry policy.
-                }
-                Err(e) => {
-                    last_err = Some(e);
-                }
-            }
+            let err = match r {
+                Ok(()) => match self.assistant_error_message(&self.last_assistant()) {
+                    Some(error_message) => AgentRunError::Other(error_message),
+                    None => return Ok(()),
+                },
+                Err(e) => e,
+            };
+            // Successful prompt() can still leave a synthesized error assistant message
+            // (provider stream encoded the error). Re-evaluate via retry policy.
 
             if !self.settings.enabled || attempt >= self.settings.max_retries {
-                return Err(last_err.unwrap_or_else(|| {
-                    AgentRunError::Other("retries exhausted with no error captured".into())
-                }));
+                return Err(err);
             }
 
-            // Check the latest assistant message to decide retryability.
-            let assistant = self.last_assistant();
-            let retryable = match (&assistant, &last_err) {
-                (Some(a), _) if a.stop_reason == pie_ai::StopReason::Error => a
-                    .error_message
-                    .as_deref()
-                    .map(is_retryable_error)
-                    .unwrap_or(false),
-                (_, Some(e)) => is_retryable_error(&format!("{e}")),
-                _ => false,
-            };
-            if !retryable {
-                return match last_err {
-                    Some(e) => Err(e),
-                    None => Ok(()),
-                };
+            if !is_retryable_error(&err.to_string()) {
+                return Err(err);
             }
 
             attempt += 1;
@@ -132,8 +115,7 @@ impl AgentSession {
 
             // Drop the failed assistant message from agent state so continue_() doesn't replay
             // a context that ends in an error.
-            self.pop_failed_assistant();
-            last_err = None;
+            self.rewind_failed_assistant().await?;
         }
     }
 
@@ -147,18 +129,17 @@ impl AgentSession {
         None
     }
 
-    fn is_retryable_assistant(&self, a: &Option<PiAssistantMessage>) -> bool {
-        let Some(a) = a else { return false };
+    fn assistant_error_message(&self, a: &Option<PiAssistantMessage>) -> Option<String> {
+        let Some(a) = a else { return None };
         if a.stop_reason != pie_ai::StopReason::Error {
-            return false;
+            return None;
         }
         a.error_message
-            .as_deref()
-            .map(is_retryable_error)
-            .unwrap_or(false)
+            .clone()
+            .or_else(|| Some("assistant stopped with an error".to_string()))
     }
 
-    fn pop_failed_assistant(&self) {
+    async fn rewind_failed_assistant(&self) -> Result<(), AgentRunError> {
         let mut s = self.harness.agent().state();
         while let Some(last) = s.messages.last() {
             if matches!(last, AgentMessage::Llm(PiMessage::Assistant(a)) if a.stop_reason == pie_ai::StopReason::Error)
@@ -168,11 +149,40 @@ impl AgentSession {
                 break;
             }
         }
+        drop(s);
+
+        let session = self.harness.session();
+        let Some(leaf_id) = session
+            .leaf_id()
+            .await
+            .map_err(|e| AgentRunError::Other(format!("session retry leaf lookup: {e}")))?
+        else {
+            return Ok(());
+        };
+        let Some(SessionTreeEntry::Message {
+            parent_id,
+            message: AgentMessage::Llm(PiMessage::Assistant(a)),
+            ..
+        }) = session
+            .get_entry(&leaf_id)
+            .await
+            .map_err(|e| AgentRunError::Other(format!("session retry leaf entry lookup: {e}")))?
+        else {
+            return Ok(());
+        };
+        if a.stop_reason == pie_ai::StopReason::Error {
+            session
+                .move_to(parent_id.as_deref(), None)
+                .await
+                .map_err(|e| AgentRunError::Other(format!("session retry rewind: {e}")))?;
+        }
+        Ok(())
     }
 }
 
 fn backoff_ms(attempt: u32, base: u64, max: u64) -> u64 {
-    let n = (base as u128) << attempt.min(10);
+    let exponent = attempt.saturating_sub(1).min(10);
+    let n = (base as u128) << exponent;
     n.min(max as u128) as u64
 }
 
@@ -201,6 +211,75 @@ pub fn forward_to_listener(_: AgentEvent) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pie_agent_core::{AgentHarnessOptions, MemorySessionStorage, Session, SessionStorage};
+    use pie_ai::{
+        AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream, AssistantRole,
+        ContentBlock, DoneReason, ModelCost, StopReason, Usage,
+    };
+
+    fn faux_model() -> pie_ai::Model {
+        pie_ai::Model {
+            id: "faux".into(),
+            name: "Faux".into(),
+            api: pie_ai::Api::from("faux"),
+            provider: pie_ai::Provider::from("faux"),
+            base_url: String::new(),
+            reasoning: false,
+            thinking_level_map: None,
+            input: vec![],
+            cost: ModelCost::default(),
+            context_window: 0,
+            max_tokens: 0,
+            headers: None,
+            compat: None,
+        }
+    }
+
+    fn assistant(
+        text: &str,
+        stop_reason: StopReason,
+        error_message: Option<&str>,
+    ) -> AssistantMessage {
+        AssistantMessage {
+            role: AssistantRole::Assistant,
+            content: vec![ContentBlock::text(text)],
+            api: pie_ai::Api::from("faux"),
+            provider: pie_ai::Provider::from("faux"),
+            model: "faux".into(),
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+            usage: Usage::default(),
+            stop_reason,
+            error_message: error_message.map(str::to_string),
+            timestamp: 0,
+        }
+    }
+
+    fn stream_fn_with(
+        responses: Arc<tokio::sync::Mutex<Vec<AssistantMessage>>>,
+    ) -> pie_agent_core::StreamFn {
+        Arc::new(move |_, _, _| {
+            let (stream, mut sender) = AssistantMessageEventStream::new();
+            let responses = responses.clone();
+            tokio::spawn(async move {
+                let msg = responses.lock().await.remove(0);
+                sender.push(AssistantMessageEvent::Start {
+                    partial: msg.clone(),
+                });
+                let reason = match msg.stop_reason {
+                    StopReason::ToolUse => DoneReason::ToolUse,
+                    StopReason::Length => DoneReason::Length,
+                    _ => DoneReason::Stop,
+                };
+                sender.push(AssistantMessageEvent::Done {
+                    reason,
+                    message: msg,
+                });
+            });
+            stream
+        })
+    }
 
     #[test]
     fn retryable_patterns_match_ts_regex() {
@@ -221,8 +300,53 @@ mod tests {
 
     #[test]
     fn backoff_grows_and_caps() {
-        assert_eq!(backoff_ms(1, 1000, 60_000), 2000);
-        assert_eq!(backoff_ms(2, 1000, 60_000), 4000);
-        assert_eq!(backoff_ms(8, 1000, 60_000), 60_000);
+        assert_eq!(backoff_ms(1, 1000, 60_000), 1000);
+        assert_eq!(backoff_ms(2, 1000, 60_000), 2000);
+        assert_eq!(backoff_ms(9, 1000, 60_000), 60_000);
+    }
+
+    #[tokio::test]
+    async fn retry_rewinds_failed_assistant_out_of_active_session_branch() {
+        let storage = Arc::new(MemorySessionStorage::new());
+        let session = Session::new(storage as Arc<dyn SessionStorage>);
+        let responses = Arc::new(tokio::sync::Mutex::new(vec![
+            assistant("temporary failure", StopReason::Error, Some("HTTP 503")),
+            assistant("ok", StopReason::Stop, None),
+        ]));
+
+        let mut opts = AgentHarnessOptions::new(faux_model(), session.clone());
+        opts.stream_fn = Some(stream_fn_with(responses));
+        let harness = Arc::new(AgentHarness::new(opts));
+        let runner = AgentSession::new(
+            harness,
+            RetrySettings {
+                base_delay_ms: 0,
+                max_delay_ms: 0,
+                max_retries: 1,
+                ..RetrySettings::default()
+            },
+        );
+
+        runner.prompt("hi").await.unwrap();
+
+        let entries = session.entries().await.unwrap();
+        assert!(entries.iter().any(|e| matches!(
+            e,
+            SessionTreeEntry::Message {
+                message: AgentMessage::Llm(PiMessage::Assistant(a)),
+                ..
+            } if a.stop_reason == StopReason::Error
+        )));
+
+        let active = session.build_context().await.unwrap();
+        assert!(!active.messages.iter().any(|m| matches!(
+            m,
+            AgentMessage::Llm(PiMessage::Assistant(a)) if a.stop_reason == StopReason::Error
+        )));
+        assert!(active.messages.iter().any(|m| matches!(
+            m,
+            AgentMessage::Llm(PiMessage::Assistant(a))
+                if a.stop_reason == StopReason::Stop
+        )));
     }
 }

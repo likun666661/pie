@@ -166,33 +166,43 @@ impl AgentHarness {
         &self,
         level: ThinkingLevel,
     ) -> Result<String, super::types::SessionError> {
-        let label = match level {
-            ThinkingLevel::Off => "off",
-            ThinkingLevel::Minimal => "minimal",
-            ThinkingLevel::Low => "low",
-            ThinkingLevel::Medium => "medium",
-            ThinkingLevel::High => "high",
-            ThinkingLevel::Xhigh => "xhigh",
-        };
-        let id = self.session.append_thinking_level_change(label).await?;
+        let id = self
+            .session
+            .append_thinking_level_change(level.as_str())
+            .await?;
         self.agent.state().thinking_level = Some(level);
         Ok(id)
     }
 
     /// Move the session leaf to a specific entry id (or root). When `summary` is provided,
-    /// records a branch_summary entry so siblings see the fork's contribution.
+    /// records a branch_summary entry so siblings see the fork's contribution. Replays the new
+    /// branch into agent state via [`Self::rehydrate_from_session`].
     pub async fn move_to(
         &self,
         entry_id: Option<&str>,
         summary: Option<BranchSummaryInput>,
     ) -> Result<Option<String>, super::types::SessionError> {
         let result = self.session.move_to(entry_id, summary).await?;
-        // Rehydrate state from the new leaf.
+        self.rehydrate_from_session().await?;
+        Ok(result)
+    }
+
+    /// Replace the agent's in-memory state with the session's active branch. Messages, model,
+    /// and thinking level are restored from `Session::build_context()`. Returns the rebuilt
+    /// `SessionContext` for callers that want to render the transcript or inspect the recovered
+    /// model.
+    ///
+    /// CLI startup (`--resume`) and post-branch-switch flows both go through this — keeps the
+    /// "how do we rehydrate?" decision in one place.
+    pub async fn rehydrate_from_session(
+        &self,
+    ) -> Result<super::session::session::SessionContext, super::types::SessionError> {
         let ctx = self.session.build_context().await?;
         let mut s = self.agent.state();
-        s.messages = ctx.messages;
+        s.messages = ctx.messages.clone();
         if let Some(model) = &ctx.model {
-            // Try to find the model in our catalog; fall back to keeping the current one.
+            // Restore the previously-active model when it's still in the catalog. Unknown
+            // models keep whatever the caller set up — the resume banner reflects that fact.
             if let Some(m) = pie_ai::get_model(
                 &pie_ai::Provider::from(model.provider.clone()),
                 &model.model_id,
@@ -200,7 +210,10 @@ impl AgentHarness {
                 s.model = Some(m);
             }
         }
-        Ok(result)
+        if let Ok(level) = ctx.thinking_level.parse::<ThinkingLevel>() {
+            s.thinking_level = Some(level);
+        }
+        Ok(ctx)
     }
 
     /// Pick a template by name, interpolate, and prompt the agent.
@@ -263,20 +276,20 @@ impl AgentHarness {
         // message is appended so the cut point doesn't risk splitting the current turn.
         self.run_auto_compaction().await?;
 
-        let listener = make_session_listener(self.session.clone());
+        let (listener, persist_errors) = make_session_listener(self.session.clone());
         let unsub = self.agent.subscribe(listener);
         let result = self.agent.prompt(msg).await;
         unsub();
-        result
+        finish_persisted_run(result, persist_errors)
     }
 
     pub async fn continue_(&self) -> Result<(), AgentRunError> {
         self.run_auto_compaction().await?;
-        let listener = make_session_listener(self.session.clone());
+        let (listener, persist_errors) = make_session_listener(self.session.clone());
         let unsub = self.agent.subscribe(listener);
         let result = self.agent.continue_().await;
         unsub();
-        result
+        finish_persisted_run(result, persist_errors)
     }
 
     /// Force a compaction immediately, regardless of token thresholds. Useful for `/compact`-
@@ -413,13 +426,35 @@ fn build_system_prompt(base: &str, skills: &[Skill]) -> String {
 }
 
 /// Build an `AgentListener` that persists every emitted `MessageEnd` to the session log.
-fn make_session_listener(session: Session) -> crate::agent::AgentListener {
-    Arc::new(move |event, _cancel| {
+fn make_session_listener(
+    session: Session,
+) -> (
+    crate::agent::AgentListener,
+    Arc<Mutex<Vec<super::types::SessionError>>>,
+) {
+    let errors = Arc::new(Mutex::new(Vec::new()));
+    let listener_errors = errors.clone();
+    let listener: crate::agent::AgentListener = Arc::new(move |event, _cancel| {
         let session = session.clone();
+        let listener_errors = listener_errors.clone();
         Box::pin(async move {
             if let AgentEvent::MessageEnd { message } = event {
-                let _ = session.append_message(message).await;
+                if let Err(e) = session.append_message(message).await {
+                    listener_errors.lock().push(e);
+                }
             }
         })
-    })
+    });
+    (listener, errors)
+}
+
+fn finish_persisted_run(
+    result: Result<(), AgentRunError>,
+    persist_errors: Arc<Mutex<Vec<super::types::SessionError>>>,
+) -> Result<(), AgentRunError> {
+    result?;
+    if let Some(e) = persist_errors.lock().first() {
+        return Err(AgentRunError::Other(format!("session append message: {e}")));
+    }
+    Ok(())
 }

@@ -83,6 +83,7 @@ impl Registry {
         r.register(Arc::new(LoginCommand));
         r.register(Arc::new(LogoutCommand));
         r.register(Arc::new(FindCommand));
+        r.register(Arc::new(HistoryCommand));
         r
     }
 
@@ -889,6 +890,39 @@ impl SlashCommand for FindCommand {
             println!("(no matches)");
         } else {
             println!("({hits} match(es))");
+        }
+        CommandOutcome::Handled
+    }
+}
+
+struct HistoryCommand;
+
+#[async_trait]
+impl SlashCommand for HistoryCommand {
+    fn name(&self) -> &'static str {
+        "history"
+    }
+    fn description(&self) -> &'static str {
+        "show recent submitted prompts from ~/.pie/history"
+    }
+    fn usage(&self) -> &'static str {
+        "[N]"
+    }
+    async fn run(&self, argv: &[String], _ctx: &CommandCtx<'_>) -> CommandOutcome {
+        let limit: usize = argv.first().and_then(|s| s.parse().ok()).unwrap_or(20);
+        let store = crate::history::HistoryStore::load();
+        let entries = store.entries();
+        if entries.is_empty() {
+            println!("(no history yet)");
+            return CommandOutcome::Handled;
+        }
+        let start = entries.len().saturating_sub(limit);
+        for (i, e) in entries[start..].iter().enumerate() {
+            let n = start + i + 1;
+            // Truncate long entries to 200 chars to keep the listing skimmable.
+            let preview: String = e.chars().take(200).collect();
+            let suffix = if preview.len() < e.len() { "…" } else { "" };
+            println!("  {n}: {preview}{suffix}");
         }
         CommandOutcome::Handled
     }

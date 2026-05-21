@@ -3,8 +3,6 @@
 //! line-based REPL doesn't yet offer ↑/↓ recall (needs raw mode → c4pt0r/pie#2 main
 //! deliverable), but `/history` exposes the list and saved state is ready for the renderer.
 
-#![allow(dead_code)]
-
 use std::path::{Path, PathBuf};
 
 use crate::config::base_dir;
@@ -42,10 +40,12 @@ impl HistoryStore {
         &self.entries
     }
 
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }

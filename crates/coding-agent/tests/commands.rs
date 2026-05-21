@@ -30,6 +30,9 @@ mod config;
 #[path = "../src/export.rs"]
 mod export;
 #[allow(dead_code)]
+#[path = "../src/history.rs"]
+mod history;
+#[allow(dead_code)]
 #[path = "../src/session/mod.rs"]
 mod session;
 

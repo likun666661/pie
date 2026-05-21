@@ -15,6 +15,7 @@ mod images;
 mod logging;
 mod lsp;
 mod lsp_supervisor;
+mod markdown;
 mod mcp_loader;
 mod mentions;
 mod model;

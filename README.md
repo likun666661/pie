@@ -1,79 +1,119 @@
 # pie
 
-A Rust port of the [`pi` agent harness](https://github.com/earendil-works/pi) — extensible coding
-agent and the LLM-runtime stack underneath it. Cargo workspace, three member crates, layered
-strictly one direction:
+`pie` is a terminal coding agent. Run it inside a project, ask it to inspect files, make edits,
+run shell commands, remember preferences, and continue previous sessions.
 
-```
-pie/
-  Cargo.toml                  ← [workspace] root
-  crates/
-    ai/             pie-ai             unified streaming LLM client
-    agent/          pie-agent-core     stateful agent runtime
-    coding-agent/   pie-coding-agent   the `pie` CLI binary
+## Install / build
+
+```bash
+git clone https://github.com/c4pt0r/pie.git
+cd pie
+cargo build --release
 ```
 
-## What each crate does
+The CLI binary will be at `./target/release/pie`.
 
-| Crate | Highlights |
-|-------|-----------|
-| **`pie-ai`** | 10 wire protocols (anthropic / openai-responses / openai-completions / openai-codex / azure / google / google-vertex / amazon-bedrock / mistral + faux); 938-model catalog; Anthropic OAuth PKCE; provider-level HTTP retry (429/5xx/timeout); cross-provider stream-event normalization. |
-| **`pie-agent-core`** | Bare `Agent` state machine + agent loop with sequential **and** parallel tool execution; all 4 lifecycle hooks (`before/after_tool_call`, `transform_context`, `should_stop_after_turn`, `prepare_next_turn`); `AgentHarness` with auto-compaction, branch ops, model/thinking switching, prompt templates, skills catalog; JSONL + memory session repos with branching. |
-| **`pie-coding-agent`** | The `pie` CLI: line-based REPL TUI (crossterm), 8 tools (read/write/edit/bash/ls/grep/find/memory), JSONL sessions with `--resume`/`--list-sessions`/`--delete-session`, cross-session memory at `~/.pie/memory/`, `AgentSession` LLM-error auto-retry layer (TS regex parity + exponential backoff). |
+## Configure a model
+
+`pie` auto-detects the first available provider credential. Set an API key before starting:
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+# or: OPENAI_API_KEY, OPENROUTER_API_KEY, GROQ_API_KEY,
+#     MISTRAL_API_KEY, GEMINI_API_KEY, GOOGLE_API_KEY
+```
+
+You can also store a key from inside `pie`:
+
+```text
+/login anthropic sk-ant-...
+```
 
 ## Quick start
 
 ```bash
-# Build everything + run the agent
-cargo build --release
-export ANTHROPIC_API_KEY=sk-ant-...      # or OPENAI_API_KEY / GROQ_API_KEY / ...
+# Start in the current project
 ./target/release/pie
 
-# Resume the most recent session for this cwd
-./target/release/pie --resume
-
-# Common flags
-./target/release/pie --help
-./target/release/pie --list-sessions
+# Choose a specific provider/model
 ./target/release/pie --provider anthropic --model claude-haiku-4-5
+
+# Enable extended thinking where supported
 ./target/release/pie --thinking high
+
+# Resume the most recent session for this project
+./target/release/pie --resume
 ```
 
-REPL commands inside the loop: `/help`, `/clear`, `/quit`.
+Once the REPL opens, type a request such as:
 
-## Build + test
+```text
+summarize this repository
+fix the failing tests
+add a README example and run the relevant checks
+```
+
+## Useful commands
+
+Inside `pie`, slash commands control the session:
+
+| Command | What it does |
+|---------|--------------|
+| `/help` | Show all commands |
+| `/model [provider:model-id]` | Show or switch model |
+| `/thinking [off|minimal|low|medium|high|xhigh]` | Show or set thinking level |
+| `/sessions` | List sessions for the current project |
+| `/save [path]` | Export the transcript to Markdown |
+| `/compact [instructions]` | Compact long context |
+| `/undo` | Remove the most recent user/assistant turn |
+| `/cost` | Show token and cost totals |
+| `/login <provider> <api-key>` | Store an API key |
+| `/logout <provider>` | Remove a stored API key |
+| `/quit` | Exit |
+
+CLI helpers:
 
 ```bash
-cargo build --workspace
-cargo test --workspace      # 121 tests
-cargo clippy --workspace --all-targets -- -D warnings
-cargo fmt --all --check
+./target/release/pie --help
+./target/release/pie --list-sessions
+./target/release/pie --list-all-sessions
+./target/release/pie --delete-session <id>
+./target/release/pie --image screenshot.png
 ```
 
-## Status
+## What pie can do
 
-| Crate | Tests | Notes |
-|-------|------:|-------|
-| pie-ai           | 66 | All 10 providers compile; reqwest-level retry on all of them; Bedrock SigV4 / Vertex ADC / Codex WebSocket are TODO (Bearer-token paths work) |
-| pie-agent-core   | 32 | Harness fully ported (auto-compaction, branch ops, model switching, all hooks wired, parallel exec) |
-| pie-coding-agent | 23 | 8 tools, jsonl sessions with resume, cross-session memory, auto-retry on LLM errors |
+The agent has tools for common coding workflows:
 
-## Configuration paths
+- read, write, and edit files
+- list files and search with grep/find
+- run shell commands
+- manage persistent memory
+- delegate focused sub-tasks
+- resume JSONL-backed sessions per project
+- attach images to the first prompt with `--image`
 
-`pie` reads/writes:
+## Files and storage
+
+By default, `pie` stores local state under `~/.pie`:
 
 | Path | What |
 |------|------|
-| `~/.pie/sessions/<cwd-hash>/<uuidv7>.jsonl` | Per-cwd session files |
-| `~/.pie/memory/*.md`                        | Cross-session memory (auto-injected into system prompt) |
-| `$PIE_DIR`                                  | Override the base directory |
+| `~/.pie/sessions/<cwd-hash>/<uuidv7>.jsonl` | Session history for each project |
+| `~/.pie/memory/*.md` | Cross-session memory injected into future sessions |
+| `~/.pie/auth.json` | Stored API keys from `/login` |
+| `~/.pie/history` | Prompt history |
 
-## CI / Release
+Set `PIE_DIR` to use a different base directory.
 
-| Workflow | Trigger | Job |
-|----------|---------|-----|
-| [`.github/workflows/ci.yml`](.github/workflows/ci.yml)           | push / PR to `main` | `cargo fmt --check` + `cargo clippy -D warnings` + `cargo test --workspace` (ubuntu + macos) |
-| [`.github/workflows/release.yml`](.github/workflows/release.yml) | tag `v*` (or `workflow_dispatch`) | cross-build for `x86_64-unknown-linux-gnu` / `aarch64-unknown-linux-gnu` / `x86_64-apple-darwin` / `aarch64-apple-darwin`, upload tarballs to GitHub Releases |
+## Development
+
+```bash
+cargo build --workspace
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all --check
+```
 
 ## License
 

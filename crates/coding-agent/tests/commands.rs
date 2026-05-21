@@ -16,6 +16,9 @@ use pie_agent_core::{
 // references `crate::export`, so we include those siblings too. They appear unused-from-tests
 // (no items are called directly here) — that's fine; the commands module reaches into them.
 #[allow(dead_code)]
+#[path = "../src/auth.rs"]
+mod auth;
+#[allow(dead_code)]
 #[path = "../src/bug_report.rs"]
 mod bug_report;
 #[path = "../src/commands.rs"]

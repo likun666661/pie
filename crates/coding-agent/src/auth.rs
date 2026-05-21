@@ -1,10 +1,6 @@
 //! Persistent credential store for `pie`. Foundation for c4pt0r/pie#13: stores per-provider
-//! credentials at `~/.pie/auth.json` with mode 0600. v1 lands the store + atomic-write
-//! invariant; OAuth flows that actually populate it follow.
-
-// The auth module is wired into the model resolver in a follow-up commit; for now the public
-// surface compiles and is fully tested, but isn't called from the binary entry path.
-#![allow(dead_code)]
+//! credentials at `~/.pie/auth.json` with mode 0600. /login + /logout populate it;
+//! resolve_for_provider plumbs into the model resolver as an env-var fallback.
 //!
 //! Resolution precedence (in `resolve_for_provider`):
 //!   1. The provider's environment variable, if set and non-empty.
@@ -43,7 +39,8 @@ pub enum ProviderCredential {
 
 impl ProviderCredential {
     /// True if this is an OAuth credential whose expires_at is in the past or within `slack`
-    /// seconds from now.
+    /// seconds from now. Wired in by the OAuth refresher (lands in a follow-up).
+    #[allow(dead_code)]
     pub fn needs_refresh(&self, slack_seconds: i64) -> bool {
         match self {
             Self::ApiKey { .. } => false,
@@ -127,7 +124,11 @@ impl AuthStore {
     }
 
     /// Resolve a credential for `provider`. Env var wins; auth.json is the fallback. Returns
-    /// the bare API-key string for `api_key` and the access token for `oauth`.
+    /// the bare API-key string for `api_key` and the access token for `oauth`. Plumbed in by
+    /// the provider clients via env-resolver; the binary's `model::auto_detect_model` already
+    /// checks both env and `store.get`, so this helper exists for future code paths that
+    /// don't have access to the model auto-detector.
+    #[allow(dead_code)]
     pub fn resolve_for_provider(&self, provider: &str) -> Option<String> {
         let env_var = match provider {
             "anthropic" => "ANTHROPIC_API_KEY",

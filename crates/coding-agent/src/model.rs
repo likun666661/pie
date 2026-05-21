@@ -31,24 +31,28 @@ pub fn auto_detect_model(
         }
         bail!("model not found in catalog: provider={p} id={id}");
     }
-    // Detect by env.
+    // Detect by env, with the auth.json store as fallback (issue #13).
+    let store = crate::auth::AuthStore::load().unwrap_or_default();
     for (env, provider, model_id) in CANDIDATES {
-        if let Ok(v) = std::env::var(env) {
-            if v.trim().is_empty() {
-                continue;
-            }
-            if let Some(m) = get_model(&Provider::from(*provider), model_id) {
-                return Ok(m);
-            }
-            // Catalog miss — pick *any* model for this provider as a fallback so the agent
-            // still runs.
-            if let Some(any) = first_model_for_provider(provider) {
-                return Ok(any);
-            }
+        let env_set = std::env::var(env)
+            .ok()
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false);
+        let stored = store.get(provider).is_some();
+        if !env_set && !stored {
+            continue;
+        }
+        if let Some(m) = get_model(&Provider::from(*provider), model_id) {
+            return Ok(m);
+        }
+        // Catalog miss — pick *any* model for this provider as a fallback so the agent
+        // still runs.
+        if let Some(any) = first_model_for_provider(provider) {
+            return Ok(any);
         }
     }
     bail!(
-        "no API key found. Set one of: {}",
+        "no API key found. Set one of: {} env vars, or run `/login <provider> <key>` from inside pie.",
         CANDIDATES
             .iter()
             .map(|c| c.0)

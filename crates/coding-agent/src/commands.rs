@@ -80,6 +80,8 @@ impl Registry {
         r.register(Arc::new(NameCommand));
         r.register(Arc::new(SessionsCommand));
         r.register(Arc::new(ShareCommand));
+        r.register(Arc::new(LoginCommand));
+        r.register(Arc::new(LogoutCommand));
         r
     }
 
@@ -731,6 +733,84 @@ impl SlashCommand for ShareCommand {
         let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
         println!("shared: {url}");
         CommandOutcome::Handled
+    }
+}
+
+struct LoginCommand;
+
+#[async_trait]
+impl SlashCommand for LoginCommand {
+    fn name(&self) -> &'static str {
+        "login"
+    }
+    fn description(&self) -> &'static str {
+        "store an API key for a provider in ~/.pie/auth.json"
+    }
+    fn usage(&self) -> &'static str {
+        "<provider> <api-key>"
+    }
+    async fn run(&self, argv: &[String], _ctx: &CommandCtx<'_>) -> CommandOutcome {
+        if argv.len() < 2 {
+            return CommandOutcome::Error(
+                "usage: /login <provider> <api-key>  (e.g. /login anthropic sk-ant-…)".into(),
+            );
+        }
+        let provider = argv[0].clone();
+        let token = argv[1..].join(" ");
+        let mut store = match crate::auth::AuthStore::load() {
+            Ok(s) => s,
+            Err(e) => return CommandOutcome::Error(format!("load auth store: {e}")),
+        };
+        store.set(
+            provider.clone(),
+            crate::auth::ProviderCredential::ApiKey { value: token },
+        );
+        if let Err(e) = store.save() {
+            return CommandOutcome::Error(format!("save auth store: {e}"));
+        }
+        println!(
+            "saved api key for `{provider}` to {}",
+            crate::auth::auth_path().display()
+        );
+        CommandOutcome::Handled
+    }
+}
+
+struct LogoutCommand;
+
+#[async_trait]
+impl SlashCommand for LogoutCommand {
+    fn name(&self) -> &'static str {
+        "logout"
+    }
+    fn description(&self) -> &'static str {
+        "remove a stored credential from ~/.pie/auth.json"
+    }
+    fn usage(&self) -> &'static str {
+        "<provider>"
+    }
+    async fn run(&self, argv: &[String], _ctx: &CommandCtx<'_>) -> CommandOutcome {
+        if argv.is_empty() {
+            return CommandOutcome::Error("usage: /logout <provider>".into());
+        }
+        let provider = &argv[0];
+        let mut store = match crate::auth::AuthStore::load() {
+            Ok(s) => s,
+            Err(e) => return CommandOutcome::Error(format!("load auth store: {e}")),
+        };
+        match store.remove(provider) {
+            Some(_) => match store.save() {
+                Ok(()) => {
+                    println!("removed credential for `{provider}`");
+                    CommandOutcome::Handled
+                }
+                Err(e) => CommandOutcome::Error(format!("save auth store: {e}")),
+            },
+            None => {
+                println!("no credential stored for `{provider}`");
+                CommandOutcome::Handled
+            }
+        }
     }
 }
 

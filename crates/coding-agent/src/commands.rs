@@ -65,6 +65,7 @@ impl Registry {
         r.register(Arc::new(QuitCommand));
         r.register(Arc::new(ModelCommand));
         r.register(Arc::new(ThinkingCommand));
+        r.register(Arc::new(CostCommand));
         r
     }
 
@@ -313,6 +314,31 @@ pub fn print_help(registry: &Registry) {
     println!();
     println!("Anything else is sent as a prompt to the agent.");
     println!();
+}
+
+struct CostCommand;
+
+#[async_trait]
+impl SlashCommand for CostCommand {
+    fn name(&self) -> &'static str {
+        "cost"
+    }
+    fn description(&self) -> &'static str {
+        "show running token / USD totals for this session"
+    }
+    fn usage(&self) -> &'static str {
+        "[reset]"
+    }
+    async fn run(&self, argv: &[String], ctx: &CommandCtx<'_>) -> CommandOutcome {
+        if argv.first().map(|s| s.as_str()) == Some("reset") {
+            ctx.harness.reset_cost();
+            println!("cost counters reset");
+            return CommandOutcome::Handled;
+        }
+        let snap = ctx.harness.cost();
+        println!("{}", pie_agent_core::cost_full_breakdown(&snap));
+        CommandOutcome::Handled
+    }
 }
 
 pub async fn dispatch(input: &str, registry: &Registry, ctx: &CommandCtx<'_>) -> CommandOutcome {

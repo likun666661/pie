@@ -36,6 +36,10 @@ pub use harness::{
             prepare_compaction, serialize_conversation, should_compact,
         },
     },
+    cost::{
+        CostSnapshot, CostTracker, full_breakdown as cost_full_breakdown,
+        one_line_summary as cost_one_line_summary,
+    },
     messages,
     permission::{PermissionDecision, PermissionPolicy},
     session::{

@@ -4,6 +4,7 @@
 
 pub mod agent_harness;
 pub mod compaction;
+pub mod cost;
 pub mod messages;
 pub mod permission;
 pub mod prompt_templates;

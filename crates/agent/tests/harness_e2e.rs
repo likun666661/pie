@@ -358,6 +358,82 @@ async fn harness_event_bus_delivers_session_and_branch() {
     );
 }
 
+/// The harness's CostTracker accumulates Usage from every assistant turn. Two faux turns
+/// with non-zero usage should produce a snapshot whose totals are the sum.
+#[tokio::test]
+async fn cost_tracker_accumulates_across_turns() {
+    use pie_ai::UsageCost;
+
+    let storage = Arc::new(MemorySessionStorage::new());
+    let session = Session::new(storage as Arc<dyn SessionStorage>);
+
+    // Custom stream_fn that returns a deterministic Usage on every turn.
+    let usage_per_turn = Usage {
+        input: 25,
+        output: 7,
+        cache_read: 3,
+        cache_write: 0,
+        total_tokens: 35,
+        cost: UsageCost {
+            input: 0.01,
+            output: 0.02,
+            cache_read: 0.001,
+            cache_write: 0.0,
+            total: 0.031,
+        },
+    };
+    let stream: StreamFn = {
+        let usage = usage_per_turn.clone();
+        Arc::new(move |_, _, _| {
+            let usage = usage.clone();
+            let (stream, mut sender) = AssistantMessageEventStream::new();
+            tokio::spawn(async move {
+                let msg = AssistantMessage {
+                    role: AssistantRole::Assistant,
+                    content: vec![ContentBlock::text("ok")],
+                    api: pie_ai::Api::from("faux"),
+                    provider: pie_ai::Provider::from("faux"),
+                    model: "faux".into(),
+                    response_model: None,
+                    response_id: None,
+                    diagnostics: None,
+                    usage,
+                    stop_reason: StopReason::Stop,
+                    error_message: None,
+                    timestamp: 0,
+                };
+                sender.push(AssistantMessageEvent::Start {
+                    partial: msg.clone(),
+                });
+                sender.push(AssistantMessageEvent::Done {
+                    reason: DoneReason::Stop,
+                    message: msg,
+                });
+            });
+            stream
+        })
+    };
+
+    let mut opts = AgentHarnessOptions::new(faux_model(), session);
+    opts.stream_fn = Some(stream);
+    let harness = AgentHarness::new(opts);
+
+    harness.prompt("one").await.unwrap();
+    harness.prompt("two").await.unwrap();
+
+    let s = harness.cost();
+    assert_eq!(s.turn_count, 2);
+    assert_eq!(s.tokens.input, 50);
+    assert_eq!(s.tokens.output, 14);
+    assert_eq!(s.tokens.cache_read, 6);
+    assert_eq!(s.tokens.total_tokens, 70);
+    assert!((s.tokens.cost.total - 0.062).abs() < 1e-9);
+
+    harness.reset_cost();
+    assert_eq!(harness.cost().turn_count, 0);
+    assert_eq!(harness.cost().tokens.input, 0);
+}
+
 /// `Agent::abort` cancels the in-flight prompt cleanly: the prompt future resolves with an
 /// `Err` and the session jsonl contains a user message (before the abort) but no further
 /// assistant content for the cancelled turn.

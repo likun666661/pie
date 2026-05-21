@@ -57,6 +57,7 @@ use super::compaction::compaction::{
     CompactionSettings, DEFAULT_COMPACTION_SETTINGS, SummarizeError, compact,
     estimate_context_tokens, should_compact,
 };
+use super::cost::{CostSnapshot, CostTracker};
 use super::messages::compaction_summary;
 use super::prompt_templates::PromptTemplateRegistry;
 use super::session::session::{BranchSummaryInput, Session};
@@ -113,6 +114,9 @@ pub struct AgentHarness {
     /// `AgentHarness` lifetime.
     harness_listeners: Arc<Mutex<Vec<HarnessListener>>>,
     session_start_emitted: Mutex<bool>,
+    /// Running token / cost totals for this harness lifetime. Updated automatically by an
+    /// internal listener subscribed to `Agent::MessageEnd`. Snapshot via [`Self::cost`].
+    cost: CostTracker,
 }
 
 impl AgentHarness {
@@ -130,6 +134,11 @@ impl AgentHarness {
             ..Default::default()
         });
 
+        let cost = CostTracker::new();
+        // Subscribe the cost tracker to assistant MessageEnd events. Listener is wired against
+        // the inner Agent so the harness has no per-prompt setup cost.
+        let _ = agent.subscribe(cost.as_listener());
+
         Self {
             agent: Arc::new(agent),
             session: options.session,
@@ -140,7 +149,18 @@ impl AgentHarness {
             stream_fn: options.stream_fn,
             harness_listeners: Arc::new(Mutex::new(Vec::new())),
             session_start_emitted: Mutex::new(false),
+            cost,
         }
+    }
+
+    /// Snapshot of running token + cost totals.
+    pub fn cost(&self) -> CostSnapshot {
+        self.cost.snapshot()
+    }
+
+    /// Reset the cost tracker — `/cost reset` and on session-switch.
+    pub fn reset_cost(&self) {
+        self.cost.reset();
     }
 
     /// Register a harness-level lifecycle listener. Returns an unsubscriber closure.

@@ -13,6 +13,7 @@ mod config;
 mod export;
 mod images;
 mod logging;
+mod lsp;
 mod mcp_loader;
 mod mentions;
 mod model;

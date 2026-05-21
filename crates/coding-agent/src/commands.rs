@@ -82,6 +82,7 @@ impl Registry {
         r.register(Arc::new(ShareCommand));
         r.register(Arc::new(LoginCommand));
         r.register(Arc::new(LogoutCommand));
+        r.register(Arc::new(FindCommand));
         r
     }
 
@@ -811,6 +812,85 @@ impl SlashCommand for LogoutCommand {
                 CommandOutcome::Handled
             }
         }
+    }
+}
+
+struct FindCommand;
+
+#[async_trait]
+impl SlashCommand for FindCommand {
+    fn name(&self) -> &'static str {
+        "find"
+    }
+    fn description(&self) -> &'static str {
+        "search every session in this cwd for prompts/replies containing <query>"
+    }
+    fn usage(&self) -> &'static str {
+        "<query>"
+    }
+    async fn run(&self, argv: &[String], ctx: &CommandCtx<'_>) -> CommandOutcome {
+        if argv.is_empty() {
+            return CommandOutcome::Error("usage: /find <query>".into());
+        }
+        let query = argv.join(" ").to_lowercase();
+        let repo = crate::session::open_repo(ctx.cwd).await;
+        let files = match repo.list().await {
+            Ok(f) => f,
+            Err(e) => return CommandOutcome::Error(format!("list sessions: {e}")),
+        };
+        let mut hits = 0usize;
+        for path in files {
+            let session = match repo.open(&path).await {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let entries = session.entries().await.unwrap_or_default();
+            for e in entries {
+                if let pie_agent_core::SessionTreeEntry::Message { message, .. } = e {
+                    let text = match &message {
+                        pie_agent_core::AgentMessage::Llm(pie_ai::Message::User(u)) => {
+                            match &u.content {
+                                pie_ai::UserContent::Text(s) => s.clone(),
+                                pie_ai::UserContent::Blocks(blocks) => blocks
+                                    .iter()
+                                    .filter_map(|b| match b {
+                                        pie_ai::UserContentBlock::Text(t) => Some(t.text.clone()),
+                                        _ => None,
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join(" "),
+                            }
+                        }
+                        pie_agent_core::AgentMessage::Llm(pie_ai::Message::Assistant(a)) => a
+                            .content
+                            .iter()
+                            .filter_map(|b| match b {
+                                pie_ai::ContentBlock::Text(t) => Some(t.text.clone()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" "),
+                        _ => continue,
+                    };
+                    if text.to_lowercase().contains(&query) {
+                        hits += 1;
+                        let snip = text
+                            .chars()
+                            .take(120)
+                            .collect::<String>()
+                            .replace('\n', " ");
+                        let path_short = path.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
+                        println!("  {path_short}  {snip}");
+                    }
+                }
+            }
+        }
+        if hits == 0 {
+            println!("(no matches)");
+        } else {
+            println!("({hits} match(es))");
+        }
+        CommandOutcome::Handled
     }
 }
 

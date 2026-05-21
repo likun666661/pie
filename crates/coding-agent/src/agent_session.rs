@@ -28,6 +28,10 @@ pub struct RetrySettings {
     pub max_retries: u32,
     pub base_delay_ms: u64,
     pub max_delay_ms: u64,
+    /// When set and the primary model's retries exhaust on a retryable error, swap to this
+    /// `(provider, model_id)` and retry once. Returns whatever the fallback says (success or
+    /// definitive error). Each model is tried at most once per fallback chain — no looping.
+    pub fallback_model: Option<(String, String)>,
 }
 
 impl Default for RetrySettings {
@@ -37,6 +41,7 @@ impl Default for RetrySettings {
             max_retries: 5,
             base_delay_ms: 1_000,
             max_delay_ms: 60_000,
+            fallback_model: None,
         }
     }
 }
@@ -77,10 +82,12 @@ impl AgentSession {
     }
 
     /// Prompt with retry. Same signature as `AgentHarness::prompt` but loops on retryable LLM
-    /// errors with exponential backoff.
+    /// errors with exponential backoff. If a `fallback_model` is configured and the primary
+    /// run exhausts retries, the model is swapped exactly once and the loop restarts.
     pub async fn prompt(&self, text: impl Into<String>) -> Result<(), AgentRunError> {
         let text = text.into();
         let mut attempt: u32 = 0;
+        let mut fallback_used = false;
         loop {
             let r = if attempt == 0 {
                 self.harness.prompt(text.clone()).await
@@ -97,11 +104,34 @@ impl AgentSession {
             // Successful prompt() can still leave a synthesized error assistant message
             // (provider stream encoded the error). Re-evaluate via retry policy.
 
-            if !self.settings.enabled || attempt >= self.settings.max_retries {
+            if !self.settings.enabled {
                 return Err(err);
             }
 
             if !is_retryable_error(&err.to_string()) {
+                return Err(err);
+            }
+
+            if attempt >= self.settings.max_retries {
+                // Exhausted retries on the current model. If a fallback is configured and we
+                // haven't already used it, swap and restart from attempt=0.
+                if let Some((provider, model_id)) = &self.settings.fallback_model {
+                    if !fallback_used {
+                        fallback_used = true;
+                        if let Some(m) =
+                            pie_ai::get_model(&pie_ai::Provider::from(provider.as_str()), model_id)
+                        {
+                            self.rewind_failed_assistant().await?;
+                            if let Err(e) = self.harness.set_model(m).await {
+                                return Err(AgentRunError::Other(format!(
+                                    "fallback set_model failed: {e}"
+                                )));
+                            }
+                            attempt = 0;
+                            continue;
+                        }
+                    }
+                }
                 return Err(err);
             }
 

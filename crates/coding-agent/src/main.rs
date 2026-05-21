@@ -6,6 +6,7 @@
 //! Trimmed scope: no extensions, no themes, no print/rpc/json modes.
 
 mod agent_session;
+mod commands;
 mod config;
 mod model;
 mod session;
@@ -182,6 +183,8 @@ async fn run_repl(cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo) -> 
     // Wire the TUI listener so each prompt's events stream live.
     let _unsub = harness.agent().subscribe(tui.listener());
 
+    let registry = commands::Registry::with_builtins();
+
     // REPL — async stdin so we can race a Ctrl-C abort against the in-flight prompt.
     let mut stdin = tokio::io::BufReader::new(tokio::io::stdin()).lines();
     let mut last_idle_ctrlc: Option<Instant> = None;
@@ -219,22 +222,26 @@ async fn run_repl(cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo) -> 
         if input.is_empty() {
             continue;
         }
-        if input == "/quit" || input == "/exit" || input == "/q" {
-            tui.system_line("bye");
-            break;
-        }
-        if input == "/help" {
-            print_help();
-            continue;
-        }
-        if input == "/clear" {
-            // Clear screen via ANSI; conversation state is unchanged.
-            print!("\x1b[2J\x1b[H");
-            let _ = std::io::stdout().flush();
-            continue;
-        }
-        if input == "/skills" {
-            print_skills(&harness);
+
+        // Slash commands flow through the registry; the special outcomes (Quit / ClearScreen)
+        // affect REPL state, so we handle them here. Everything else falls through to a
+        // prompt.
+        if input.starts_with('/') {
+            let ctx = commands::CommandCtx { harness: &harness };
+            match commands::dispatch(input, &registry, &ctx).await {
+                commands::CommandOutcome::Quit => {
+                    tui.system_line("bye");
+                    break;
+                }
+                commands::CommandOutcome::ClearScreen => {
+                    print!("\x1b[2J\x1b[H");
+                    let _ = std::io::stdout().flush();
+                }
+                commands::CommandOutcome::Error(e) => {
+                    tui.error_line(&e);
+                }
+                commands::CommandOutcome::Handled => {}
+            }
             continue;
         }
 
@@ -274,35 +281,6 @@ async fn run_repl(cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo) -> 
         }
     }
     Ok(())
-}
-
-fn print_help() {
-    println!();
-    println!("Commands:");
-    println!("  /help          show this help");
-    println!("  /skills        list loaded skills");
-    println!("  /clear         clear screen (keeps history)");
-    println!("  /quit | /q     exit");
-    println!();
-    println!("Anything else is sent as a prompt to the agent.");
-    println!();
-}
-
-fn print_skills(harness: &AgentHarness) {
-    let skills = harness.skills();
-    if skills.is_empty() {
-        println!(
-            "(no skills loaded — drop SKILL.md files under ~/.pie/skills/<name>/ or <cwd>/.pie/skills/<name>/)"
-        );
-        return;
-    }
-    println!("Loaded skills ({}):", skills.len());
-    for s in &skills {
-        println!("  - {}  ({})", s.name, s.file_path);
-        if !s.description.is_empty() {
-            println!("      {}", s.description);
-        }
-    }
 }
 
 fn parse_thinking(s: &str) -> Result<ThinkingLevel> {

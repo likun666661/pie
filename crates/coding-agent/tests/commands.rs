@@ -15,6 +15,9 @@ use pie_agent_core::{
 // exercises the actual code path without restructuring the crate as a [lib]. `commands.rs`
 // references `crate::export`, so we include those siblings too. They appear unused-from-tests
 // (no items are called directly here) — that's fine; the commands module reaches into them.
+#[allow(dead_code)]
+#[path = "../src/bug_report.rs"]
+mod bug_report;
 #[path = "../src/commands.rs"]
 mod commands;
 #[allow(dead_code)]
@@ -23,9 +26,6 @@ mod config;
 #[allow(dead_code)]
 #[path = "../src/export.rs"]
 mod export;
-#[allow(dead_code)]
-#[path = "../src/bug_report.rs"]
-mod bug_report;
 
 fn faux_model() -> pie_ai::Model {
     pie_ai::Model {
@@ -171,6 +171,30 @@ async fn dispatch_undo_removes_last_turn_from_active_branch() {
     assert_eq!(
         after, 0,
         "after /undo, both user + assistant should be off the active branch"
+    );
+}
+
+#[tokio::test]
+async fn dispatch_name_sets_session_name() {
+    let storage = Arc::new(MemorySessionStorage::new());
+    let session = Session::new(storage as Arc<dyn SessionStorage>);
+    let opts = AgentHarnessOptions::new(faux_model(), session.clone());
+    let harness = Arc::new(AgentHarness::new(opts));
+
+    let registry = commands::Registry::with_builtins();
+    let cwd = std::env::current_dir().unwrap();
+    let ctx = commands::CommandCtx {
+        harness: &harness,
+        session_id: "test",
+        log_path: None,
+        tool_count: 0,
+        cwd: &cwd,
+    };
+    let outcome = commands::dispatch("/name my-thing", &registry, &ctx).await;
+    assert!(matches!(outcome, commands::CommandOutcome::Handled));
+    assert_eq!(
+        session.session_name().await.unwrap().as_deref(),
+        Some("my-thing")
     );
 }
 

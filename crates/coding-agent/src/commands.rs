@@ -77,6 +77,7 @@ impl Registry {
         r.register(Arc::new(CompactCommand));
         r.register(Arc::new(UndoCommand));
         r.register(Arc::new(BugReportCommand));
+        r.register(Arc::new(NameCommand));
         r
     }
 
@@ -600,6 +601,44 @@ impl SlashCommand for BugReportCommand {
                 CommandOutcome::Handled
             }
             Err(e) => CommandOutcome::Error(format!("bug-report failed: {e}")),
+        }
+    }
+}
+
+struct NameCommand;
+
+#[async_trait]
+impl SlashCommand for NameCommand {
+    fn name(&self) -> &'static str {
+        "name"
+    }
+    fn description(&self) -> &'static str {
+        "show or set the current session's name"
+    }
+    fn usage(&self) -> &'static str {
+        "[slug]"
+    }
+    async fn run(&self, argv: &[String], ctx: &CommandCtx<'_>) -> CommandOutcome {
+        let session = ctx.harness.session();
+        if argv.is_empty() {
+            match session.session_name().await {
+                Ok(Some(n)) => println!("session name: {n}"),
+                Ok(None) => println!("(unnamed session)"),
+                Err(e) => return CommandOutcome::Error(format!("read name: {e}")),
+            }
+            return CommandOutcome::Handled;
+        }
+        let name = argv.join(" ");
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return CommandOutcome::Error("empty name".into());
+        }
+        match session.append_session_name(trimmed.to_string()).await {
+            Ok(_) => {
+                println!("session name set to: {trimmed}");
+                CommandOutcome::Handled
+            }
+            Err(e) => CommandOutcome::Error(format!("set name failed: {e}")),
         }
     }
 }

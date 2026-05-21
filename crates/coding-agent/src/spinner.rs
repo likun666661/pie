@@ -28,6 +28,13 @@ impl SpinnerHandle {
             let _ = t.await;
         }
     }
+
+    /// Shared stop flag — clone into a listener that fires the moment streamed output starts,
+    /// so the spinner's `\r\x1b[2K` line-erase doesn't fight with the stream. The held
+    /// `SpinnerHandle` can still call `stop().await` later as an idempotent final cleanup.
+    pub fn stop_flag(&self) -> Arc<AtomicBool> {
+        self.stop.clone()
+    }
 }
 
 impl Drop for SpinnerHandle {
@@ -48,19 +55,28 @@ pub fn start(label: impl Into<String>) -> SpinnerHandle {
     let stop_clone = stop.clone();
     let task = tokio::spawn(async move {
         let mut frame = 0usize;
+        let mut printed_at_least_once = false;
         loop {
             if stop_clone.load(Ordering::SeqCst) {
-                // Clear the spinner line on exit.
-                eprint!("\r\x1b[2K");
-                use std::io::Write;
-                let _ = std::io::stderr().flush();
+                // Only erase the line if we owned it (i.e. printed at least one frame).
+                // Otherwise we'd `\r\x1b[2K` a line that's currently holding streamed
+                // assistant output and wipe the user's content. After the flag flips, the
+                // next-line newline we emit here keeps subsequent output cleanly separated.
+                if printed_at_least_once {
+                    eprint!("\r\x1b[2K");
+                    use std::io::Write;
+                    let _ = std::io::stderr().flush();
+                }
                 break;
             }
             let icon = FRAMES[frame % FRAMES.len()];
-            // \r returns to column 0; \x1b[2K erases the line; then we re-draw.
+            // \r returns to column 0; \x1b[2K erases the line; then we re-draw. Safe only
+            // when nothing else is writing to this line — callers stop us before streaming
+            // output begins (see Tui::AgentStart in main.rs).
             eprint!("\r\x1b[2K{icon} {label}");
             use std::io::Write;
             let _ = std::io::stderr().flush();
+            printed_at_least_once = true;
             frame = frame.wrapping_add(1);
             tokio::time::sleep(Duration::from_millis(FRAME_MS)).await;
         }

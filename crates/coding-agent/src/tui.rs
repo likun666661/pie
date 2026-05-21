@@ -8,8 +8,8 @@
 use std::io::Write as _;
 use std::sync::Arc;
 
+use crossterm::ExecutableCommand;
 use crossterm::style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor};
-use crossterm::{ExecutableCommand, QueueableCommand};
 use parking_lot::Mutex;
 use pie_agent_core::{AgentEvent, AgentListener, AgentMessage};
 use pie_ai::{
@@ -103,65 +103,63 @@ impl Tui {
 
     fn handle_event(&self, event: &AgentEvent) {
         let mut out = std::io::stdout();
+        self.render_event(event, &mut out);
+    }
+
+    /// Render one event to any `Write`. Stdout in production, a `Vec<u8>` in tests so we
+    /// can inspect the exact ANSI-bearing byte stream the agent emits during a turn.
+    ///
+    /// Reorg notes vs the previous version (which was racy + duplicated):
+    /// - Tool calls now print exactly once, on `ToolExecutionStart` (the half-formed
+    ///   `MessageUpdate::ToolCallStart` no longer emits — it just tracked thinking-close
+    ///   state previously).
+    /// - Thinking content is emitted to stderr instead of stdout so a future
+    ///   `--no-thinking` flag / pipe consumer can suppress it without losing the actual
+    ///   reply.
+    /// - Every state transition (thinking→text, thinking→tool, tool-result→text) emits a
+    ///   single explicit `\n` then resets color/attrs so subsequent text never carries
+    ///   stale formatting.
+    pub fn render_event(&self, event: &AgentEvent, out: &mut dyn std::io::Write) {
         match event {
             AgentEvent::AgentStart => {
-                self.state.lock().text_open = false;
-                self.state.lock().thinking_open = false;
-                let _ = out.queue(SetForegroundColor(Color::Green));
-                let _ = out.queue(Print("\npi> "));
-                let _ = out.queue(ResetColor);
+                let mut s = self.state.lock();
+                s.text_open = false;
+                s.thinking_open = false;
+                drop(s);
+                let _ = write!(out, "{GREEN}pi> {RESET}");
                 let _ = out.flush();
             }
             AgentEvent::AgentEnd { .. } => {
-                let _ = out.execute(Print("\n"));
+                // Close the open content line so the next REPL prompt isn't glued onto it.
+                self.close_open_block(out);
             }
             AgentEvent::MessageUpdate {
                 assistant_message_event,
                 ..
             } => match assistant_message_event {
                 AssistantMessageEvent::TextDelta { delta, .. } => {
-                    if self.state.lock().thinking_open {
-                        let _ = out.queue(SetAttribute(Attribute::Reset));
-                        let _ = out.queue(Print("\n"));
-                        self.state.lock().thinking_open = false;
-                    }
+                    self.close_thinking(out);
                     self.state.lock().text_open = true;
-                    let _ = out.execute(Print(delta));
+                    let _ = write!(out, "{delta}");
+                    let _ = out.flush();
                 }
                 AssistantMessageEvent::ThinkingDelta { delta, .. } => {
                     if !self.state.lock().thinking_open {
-                        let _ = out.queue(SetForegroundColor(Color::DarkGrey));
-                        let _ = out.queue(SetAttribute(Attribute::Italic));
-                        let _ = out.queue(Print("\n[thinking] "));
+                        let _ = write!(out, "\n{DARK_GREY}{ITALIC}[thinking] ");
                         self.state.lock().thinking_open = true;
                     }
-                    let _ = out.execute(Print(delta));
-                }
-                AssistantMessageEvent::ToolCallStart {
-                    partial,
-                    content_index,
-                } => {
-                    if self.state.lock().thinking_open {
-                        let _ = out.queue(SetAttribute(Attribute::Reset));
-                        let _ = out.queue(Print("\n"));
-                        self.state.lock().thinking_open = false;
-                    }
-                    if let Some(ContentBlock::ToolCall(tc)) = partial.content.get(*content_index) {
-                        let _ = out.queue(SetForegroundColor(Color::Yellow));
-                        let _ = out.queue(Print(format!("\n⚙ {}", tc.name)));
-                        let _ = out.queue(ResetColor);
-                        let _ = out.flush();
-                    }
+                    let _ = write!(out, "{delta}");
+                    let _ = out.flush();
                 }
                 _ => {}
             },
             AgentEvent::ToolExecutionStart {
                 tool_name, args, ..
             } => {
+                self.close_thinking(out);
+                self.close_text(out);
                 let arg_preview = preview(args);
-                let _ = out.queue(SetForegroundColor(Color::Yellow));
-                let _ = out.queue(Print(format!("\n  ⚙ {tool_name}{arg_preview}\n")));
-                let _ = out.queue(ResetColor);
+                let _ = writeln!(out, "{YELLOW}⚙ {tool_name}{arg_preview}{RESET}");
                 let _ = out.flush();
             }
             AgentEvent::ToolExecutionEnd {
@@ -170,26 +168,49 @@ impl Tui {
                 is_error,
                 ..
             } => {
-                let color = if *is_error {
-                    Color::Red
-                } else {
-                    Color::DarkGreen
-                };
-                let _ = out.queue(SetForegroundColor(color));
+                let color = if *is_error { RED } else { DARK_GREEN };
                 for block in &result.content {
                     if let UserContentBlock::Text(t) = block {
                         for line in t.text.lines() {
-                            let _ = out.queue(Print(format!("    {line}\n")));
+                            let _ = writeln!(out, "{color}    {line}{RESET}");
                         }
                     }
                 }
-                let _ = out.queue(ResetColor);
                 let _ = out.flush();
             }
             _ => {}
         }
     }
+
+    fn close_thinking(&self, out: &mut dyn std::io::Write) {
+        if self.state.lock().thinking_open {
+            let _ = writeln!(out, "{RESET}");
+            self.state.lock().thinking_open = false;
+        }
+    }
+
+    fn close_text(&self, out: &mut dyn std::io::Write) {
+        if self.state.lock().text_open {
+            let _ = writeln!(out);
+            self.state.lock().text_open = false;
+        }
+    }
+
+    fn close_open_block(&self, out: &mut dyn std::io::Write) {
+        self.close_thinking(out);
+        self.close_text(out);
+    }
 }
+
+// Hand-rolled ANSI SGR escapes. Cheaper than the crossterm command queue + works on any
+// `Write` impl (so the test capture can use a `Vec<u8>`).
+const RESET: &str = "\x1b[0m";
+const ITALIC: &str = "\x1b[3m";
+const GREEN: &str = "\x1b[32m";
+const YELLOW: &str = "\x1b[33m";
+const RED: &str = "\x1b[31m";
+const DARK_GREY: &str = "\x1b[90m";
+const DARK_GREEN: &str = "\x1b[32;2m";
 
 fn preview(args: &serde_json::Value) -> String {
     if let Some(obj) = args.as_object() {

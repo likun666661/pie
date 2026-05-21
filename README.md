@@ -1,6 +1,6 @@
 # pie
 
-`pie` is a terminal coding agent. Run it inside a project, ask it to inspect files, make edits,
+`pie` is a Rust rewrite of the original [pi](https://github.com/earendil-works/pie) project (pi-coding-agent). `pie` is a terminal-based AI coding agent, run it inside a project, ask it to inspect files, make edits,
 run shell commands, remember preferences, and continue previous sessions.
 
 ## Install / build
@@ -114,10 +114,6 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 ```
-
-## Credits
-
-`pie` is a Rust rewrite of the original [`pi`](https://github.com/earendil-works/pi) project by earendil-works.
 
 ## License
 

@@ -25,8 +25,6 @@ mod oauth;
 mod otlp;
 mod session;
 mod skills;
-#[allow(dead_code)]
-mod spinner;
 mod templates;
 mod tools;
 mod tui;
@@ -460,13 +458,6 @@ async fn run_repl(mut cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo)
         // First-time image attachment goes through harness.prompt_with_images directly; the
         // session_runner retry/rewind path doesn't need to participate for a one-shot
         // describe-this-image flow.
-        //
-        // No spinner in the current line-based REPL — the spinner's `\r\x1b[2K` redraw
-        // racing against streamed stdout output corrupts scrollback (it clears whichever
-        // line the cursor happens to be on, which by streaming time is the assistant's
-        // line, not the spinner's). A real status indicator needs to own the cursor; that
-        // lives in the raw-mode TUI overhaul (issue #2 main deliverable). The
-        // `spinner` module is kept for that future renderer to reuse.
         let prompt_fut = async {
             if has_images {
                 harness.prompt_with_images(expanded, pending_images).await

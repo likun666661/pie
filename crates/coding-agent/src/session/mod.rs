@@ -169,6 +169,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resume_with_no_id_picks_most_recent_session() {
+        // UUIDv7 is time-ordered, so the lexically-greatest filename in the sessions dir is
+        // the newest one. Verify resume() picks it when called with no explicit id (which is
+        // what `pie -c / --continue` ends up doing).
+        let dir = tempdir().unwrap();
+        let repo = JsonlSessionRepo::new(dir.path());
+
+        // First, older session.
+        let older = repo.create("/cwd").await.unwrap();
+        let older_id = older
+            .storage()
+            .get_metadata_json()
+            .await
+            .unwrap()
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .to_string();
+        // tiny sleep to ensure the UUIDv7 timestamp slot bumps for the next create
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+        let newer = repo.create("/cwd").await.unwrap();
+        let newer_id = newer
+            .storage()
+            .get_metadata_json()
+            .await
+            .unwrap()
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .to_string();
+        assert_ne!(older_id, newer_id);
+
+        let picked = resume(&repo, None).await.unwrap();
+        let picked_id = picked
+            .storage()
+            .get_metadata_json()
+            .await
+            .unwrap()
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            picked_id, newer_id,
+            "resume() with no id should pick the most recent session"
+        );
+    }
+
+    #[tokio::test]
     async fn delete_matches_legacy_metadata_id_when_file_stem_differs() {
         let dir = tempdir().unwrap();
         let repo = JsonlSessionRepo::new(dir.path());

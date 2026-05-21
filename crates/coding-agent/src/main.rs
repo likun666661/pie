@@ -47,6 +47,10 @@ struct Cli {
     /// Resume the most recent session for this cwd (or pass --resume-id for a specific one).
     #[arg(long)]
     resume: bool,
+    /// Continue the most recent session for this cwd. Alias for --resume; the conventional
+    /// short flag people reach for.
+    #[arg(long = "continue", short = 'c')]
+    continue_: bool,
     /// Resume a specific session by id (full UUIDv7 or a unique prefix).
     #[arg(long, value_name = "ID")]
     resume_id: Option<String>,
@@ -104,8 +108,9 @@ async fn run_repl(cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo) -> 
     let model = model::auto_detect_model(cli.provider.as_deref(), cli.model.as_deref())?;
     let thinking = parse_thinking(&cli.thinking)?;
 
-    // Resolve / create the session.
-    let (session, resumed) = if cli.resume || cli.resume_id.is_some() {
+    // Resolve / create the session. `--continue` is just `--resume` without an id.
+    let should_resume = cli.resume || cli.continue_ || cli.resume_id.is_some();
+    let (session, resumed) = if should_resume {
         let s = session::resume(&repo, cli.resume_id.as_deref()).await?;
         (s, true)
     } else {

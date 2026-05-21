@@ -264,10 +264,20 @@ async fn call_llm(
 
     let mut stream = stream_fn(&model, &context, Some(&options));
     let mut last_message: Option<PiAssistantMessage> = None;
-    while let Some(ev) = stream.next().await {
-        if cancel.is_cancelled() {
-            return Err(AgentRunError::Other("aborted".into()));
-        }
+    loop {
+        // Race the stream's next event against the cancellation token. Polling order is
+        // biased toward cancellation so a Ctrl-C arriving mid-stall doesn't have to wait
+        // for the next provider event to flush before we bail out. Closes #18.
+        let ev = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                return Err(AgentRunError::Other("aborted".into()));
+            }
+            next = stream.next() => match next {
+                Some(ev) => ev,
+                None => break,
+            }
+        };
         match &ev {
             AssistantMessageEvent::Start { partial } => {
                 last_message = Some(partial.clone());

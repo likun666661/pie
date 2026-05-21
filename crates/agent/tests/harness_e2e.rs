@@ -358,6 +358,58 @@ async fn harness_event_bus_delivers_session_and_branch() {
     );
 }
 
+/// Regression test for c4pt0r/pie#18. Prior behaviour: `Agent::abort()` cancelled the token
+/// but `agent_loop` only re-checked it after `stream.next()` returned, so an LLM stream that
+/// stalled mid-flight kept the prompt future blocked. The fix races `stream.next()` against
+/// `cancel.cancelled()` with a `biased` select.
+///
+/// This test uses a "never-emits" stream: the spawned task pushes nothing and parks itself.
+/// Before the fix, `harness.abort()` would not unblock the prompt — the test would hang and
+/// trigger the tokio test timeout. With the fix, the abort lands in <100ms.
+#[tokio::test(flavor = "current_thread")]
+async fn abort_promptly_unblocks_a_stalled_stream() {
+    let stalled: StreamFn = Arc::new(move |_, _, _| {
+        let (stream, sender) = AssistantMessageEventStream::new();
+        // Keep the sender alive inside a parked task so `stream.next()` never resolves on its
+        // own; only abort can unblock the consumer.
+        tokio::spawn(async move {
+            let _sender = sender; // hold ownership
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        });
+        stream
+    });
+
+    let storage = Arc::new(MemorySessionStorage::new());
+    let session = Session::new(storage as Arc<dyn SessionStorage>);
+    let mut opts = AgentHarnessOptions::new(faux_model(), session);
+    opts.stream_fn = Some(stalled);
+    let harness = Arc::new(AgentHarness::new(opts));
+
+    let h2 = harness.clone();
+    let prompt_task = tokio::spawn(async move { h2.prompt("hi").await });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let abort_at = std::time::Instant::now();
+    harness.abort();
+
+    // The prompt future must resolve quickly after the abort signal. Anything beyond a
+    // generous bound here means cancellation isn't being honored mid-stream.
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), prompt_task)
+        .await
+        .expect("prompt task must resolve within 2s of abort")
+        .expect("prompt task did not panic");
+    let elapsed = abort_at.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_millis(500),
+        "abort took {elapsed:?} — should be near-instant"
+    );
+    let err = outcome.unwrap_err().to_string();
+    assert!(
+        err.to_lowercase().contains("abort"),
+        "expected abort error: {err}"
+    );
+}
+
 /// The harness's CostTracker accumulates Usage from every assistant turn. Two faux turns
 /// with non-zero usage should produce a snapshot whose totals are the sum.
 #[tokio::test]

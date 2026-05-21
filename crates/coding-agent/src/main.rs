@@ -9,6 +9,7 @@ mod agent_session;
 mod commands;
 mod config;
 mod logging;
+mod mentions;
 mod model;
 mod session;
 mod skills;
@@ -283,12 +284,16 @@ async fn run_repl(cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo) -> 
             continue;
         }
 
+        // Expand `@file` mentions before sending. The original `@path` token stays in the
+        // user's text; the file content is prepended in a small attachment block.
+        let (expanded, _resolved) = mentions::expand(input, &cwd).await;
+
         // Run the prompt while watching for Ctrl-C. On signal, ask the harness to abort and
         // keep awaiting the future so it cleans up; the result tells us whether it aborted.
         let aborted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let aborted_for_signal = aborted.clone();
         let harness_for_signal = harness.clone();
-        let prompt_fut = session_runner.prompt(input.to_string());
+        let prompt_fut = session_runner.prompt(expanded);
         tokio::pin!(prompt_fut);
         let signal_fut = async move {
             // First Ctrl-C while a prompt is in flight: abort.

@@ -83,4 +83,4 @@ TUI (no editor/autocomplete/fuzzy/kill-ring/undo/terminal-image — we use cross
 
 ## License
 
-[MIT](LICENSE).
+[MIT](LICENSE)

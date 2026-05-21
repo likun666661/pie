@@ -18,6 +18,7 @@ pub mod sigv4;
 pub mod stream;
 pub mod types;
 pub mod utils;
+pub mod vertex_provider;
 
 // Public surface — mirrors `packages/ai/src/index.ts`.
 pub use api_registry::{

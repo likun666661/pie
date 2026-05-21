@@ -89,12 +89,17 @@ async fn first_user_text(session: &Session) -> Option<String> {
                     .collect::<Vec<_>>()
                     .join(" "),
             };
-            let mut text = text.replace('\n', " ");
-            if text.len() > 80 {
-                text.truncate(80);
-                text.push('…');
-            }
-            return Some(text);
+            // Char-bounded truncation: `String::truncate` works in bytes and panics if
+            // the cutoff lands inside a multi-byte UTF-8 character (CJK / emoji).
+            let text = text.replace('\n', " ");
+            let preview = if text.chars().count() > 80 {
+                let mut p: String = text.chars().take(80).collect();
+                p.push('…');
+                p
+            } else {
+                text
+            };
+            return Some(preview);
         }
     }
     None

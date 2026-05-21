@@ -218,20 +218,13 @@ fn preview(args: &serde_json::Value) -> String {
         for (k, v) in obj.iter().take(3) {
             let val = match v {
                 serde_json::Value::String(s) => {
-                    let mut s = s.replace('\n', "\\n");
-                    if s.len() > 60 {
-                        s.truncate(60);
-                        s.push('…');
-                    }
+                    let s = s.replace('\n', "\\n");
+                    let s = truncate_chars(&s, 60);
                     format!("\"{s}\"")
                 }
                 _ => {
-                    let mut s = v.to_string();
-                    if s.len() > 60 {
-                        s.truncate(60);
-                        s.push('…');
-                    }
-                    s
+                    let s = v.to_string();
+                    truncate_chars(&s, 60)
                 }
             };
             parts.push(format!("{k}={val}"));
@@ -243,6 +236,18 @@ fn preview(args: &serde_json::Value) -> String {
     } else {
         String::new()
     }
+}
+
+/// Truncate `s` to at most `max_chars` chars (NOT bytes — `String::truncate` panics if the
+/// byte offset falls inside a multi-byte UTF-8 character). Returns the original on no
+/// truncation; otherwise appends an ellipsis.
+pub(crate) fn truncate_chars(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max_chars).collect();
+    out.push('…');
+    out
 }
 
 /// Render a persisted user/assistant message from a session replay. Used when --resume hands

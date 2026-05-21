@@ -308,3 +308,165 @@ fn ensure_imports_used(
     _a: Arc<dyn AgentTool>,
 ) {
 }
+
+#[test]
+fn chinese_content_renders_unchanged() {
+    let tui = tui::Tui::new();
+    let mut buf: Vec<u8> = Vec::new();
+
+    // A full turn: Chinese thinking + Chinese reply + Chinese tool args + Chinese tool
+    // result. Assert every byte sequence survives the renderer intact (no mojibake, no
+    // truncation, no panic from byte-level indexing).
+    let thinking_text = "让我思考一下这个问题…";
+    let reply_text = "答案是：你好，世界！这是一个混合的回复，包含 ASCII and 中文。";
+    let tool_result_lines = "第一行\n第二行 with mixed ASCII\n第三行";
+
+    tui.render_event(&AgentEvent::AgentStart, &mut buf);
+
+    let partial = assistant(vec![ContentBlock::Thinking(pie_ai::ThinkingContent {
+        thinking: String::new(),
+        thinking_signature: None,
+        redacted: false,
+    })]);
+    tui.render_event(
+        &message_update(
+            AssistantMessageEvent::ThinkingDelta {
+                content_index: 0,
+                delta: thinking_text.into(),
+                partial: partial.clone(),
+            },
+            partial,
+        ),
+        &mut buf,
+    );
+
+    tui.render_event(
+        &AgentEvent::ToolExecutionStart {
+            tool_call_id: "t1".into(),
+            tool_name: "read".into(),
+            args: serde_json::json!({ "path": "/tmp/中文文件.rs", "query": "查找" }),
+        },
+        &mut buf,
+    );
+    tui.render_event(
+        &AgentEvent::ToolExecutionEnd {
+            tool_call_id: "t1".into(),
+            tool_name: "read".into(),
+            result: AgentToolResult {
+                content: vec![UserContentBlock::text(tool_result_lines)],
+                details: serde_json::Value::Null,
+                terminate: None,
+            },
+            is_error: false,
+        },
+        &mut buf,
+    );
+
+    let partial = assistant(vec![ContentBlock::text("")]);
+    tui.render_event(
+        &message_update(
+            AssistantMessageEvent::TextDelta {
+                content_index: 0,
+                delta: reply_text.into(),
+                partial: partial.clone(),
+            },
+            partial,
+        ),
+        &mut buf,
+    );
+    tui.render_event(
+        &AgentEvent::AgentEnd {
+            messages: Vec::new(),
+        },
+        &mut buf,
+    );
+
+    let captured = String::from_utf8(buf).expect("renderer must emit valid UTF-8");
+    let plain = strip_ansi(&captured);
+    eprintln!("---chinese-captured---\n{captured}\n---chinese-plain---\n{plain}\n---end---");
+
+    assert!(plain.contains(thinking_text), "thinking lost: {plain}");
+    assert!(plain.contains(reply_text), "reply lost: {plain}");
+    assert!(plain.contains("/tmp/中文文件.rs"), "tool arg lost: {plain}");
+    assert!(plain.contains("第一行"), "result line 1 lost: {plain}");
+    assert!(
+        plain.contains("第二行 with mixed ASCII"),
+        "result line 2 lost: {plain}"
+    );
+    assert!(plain.contains("第三行"), "result line 3 lost: {plain}");
+}
+
+/// Specifically regress against the `preview()` byte-truncation panic. A long Chinese
+/// argument would hit `String::truncate(60)` mid-codepoint and crash the renderer. With
+/// the char-bounded fix, the long arg gets cleanly truncated + an ellipsis.
+#[test]
+fn long_chinese_tool_arg_does_not_panic() {
+    let tui = tui::Tui::new();
+    let mut buf: Vec<u8> = Vec::new();
+
+    // Construct a >60-char Chinese string. Each char is 3 bytes UTF-8 so the byte length
+    // is 3× the char count — `String::truncate(60)` would have panicked.
+    let long_chinese: String = "中文测试".repeat(30); // 120 chars, 360 bytes
+    tui.render_event(&AgentEvent::AgentStart, &mut buf);
+    tui.render_event(
+        &AgentEvent::ToolExecutionStart {
+            tool_call_id: "t1".into(),
+            tool_name: "search".into(),
+            args: serde_json::json!({ "query": long_chinese }),
+        },
+        &mut buf,
+    );
+    tui.render_event(
+        &AgentEvent::AgentEnd {
+            messages: Vec::new(),
+        },
+        &mut buf,
+    );
+
+    let plain = strip_ansi(&String::from_utf8(buf).unwrap());
+    // Output contains the tool name + an ellipsis from truncation.
+    assert!(plain.contains("⚙ search"), "{plain}");
+    assert!(
+        plain.contains('…'),
+        "ellipsis expected from truncation: {plain}"
+    );
+}
+
+/// Streaming arrives in fragments — sometimes splitting *inside* a multi-byte UTF-8 glyph
+/// at the network layer. The renderer never sees raw bytes (StreamFn already decodes), but
+/// we verify the chunk-by-chunk path doesn't break Chinese.
+#[test]
+fn streaming_chunks_preserve_chinese() {
+    let tui = tui::Tui::new();
+    let mut buf: Vec<u8> = Vec::new();
+
+    tui.render_event(&AgentEvent::AgentStart, &mut buf);
+    let partial = assistant(vec![ContentBlock::text("")]);
+    // Emit one character at a time — every single Chinese char survives the per-delta
+    // write path.
+    for ch in "你好，世界！".chars() {
+        tui.render_event(
+            &message_update(
+                AssistantMessageEvent::TextDelta {
+                    content_index: 0,
+                    delta: ch.to_string(),
+                    partial: partial.clone(),
+                },
+                partial.clone(),
+            ),
+            &mut buf,
+        );
+    }
+    tui.render_event(
+        &AgentEvent::AgentEnd {
+            messages: Vec::new(),
+        },
+        &mut buf,
+    );
+
+    let plain = strip_ansi(&String::from_utf8(buf).unwrap());
+    assert!(
+        plain.contains("你好，世界！"),
+        "single-char chunked text dropped chars: {plain}"
+    );
+}

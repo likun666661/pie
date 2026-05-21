@@ -18,6 +18,7 @@ mod lsp_supervisor;
 mod mcp_loader;
 mod mentions;
 mod model;
+mod oauth;
 mod session;
 mod skills;
 mod templates;

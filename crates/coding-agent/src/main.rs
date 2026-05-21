@@ -136,7 +136,10 @@ async fn run_repl(cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo) -> 
 
     // Build the harness.
     let memory_dir = config::memory_dir();
-    let tools = tools::default_tools(memory_dir.clone());
+    let mut tools = tools::default_tools(memory_dir.clone());
+    // Task delegation tool (issue #11). Shares the parent's model + stream backend so its
+    // subagents go through the same provider.
+    tools.push(tools::task_tool(model.clone(), None));
     let tool_names = tools
         .iter()
         .map(|tool| tool.definition().name.clone())

@@ -92,6 +92,7 @@ The agent has tools for common coding workflows:
 - delegate focused sub-tasks
 - resume JSONL-backed sessions per project
 - attach images to the first prompt with `--image`
+- run local command hooks or HTTP webhooks on agent lifecycle events; see [docs/hooks.md](docs/hooks.md)
 
 ## Files and storage
 
@@ -103,6 +104,7 @@ By default, `pie` stores local state under `~/.pie`:
 | `~/.pie/memory/*.md` | Cross-session memory injected into future sessions |
 | `~/.pie/auth.json` | Stored API keys from `/login` |
 | `~/.pie/history` | Prompt history |
+| `~/.pie/hooks.toml` | Optional command/webhook hooks |
 
 Set `PIE_DIR` to use a different base directory.
 

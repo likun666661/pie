@@ -2,7 +2,7 @@
 //!
 //! Drives a real AgentHarness + a faux StreamFn whose first text delta arrives only after
 //! a deliberate delay. Subscribes the same kind of listener main.rs installs (calls
-//! `stop_sync` on TextDelta / ThinkingDelta / tool execution). Captures the spinner's
+//! `stop_sync` on TextDelta / tool execution, but not ThinkingDelta). Captures the spinner's
 //! stderr-equivalent via the BufferSink test hook. Asserts:
 //!
 //! - Frame 0 is in the captured buffer BEFORE the LLM event arrives (synchronous render).
@@ -44,16 +44,23 @@ fn faux_model() -> pie_ai::Model {
     }
 }
 
-/// A faux stream that sleeps for `delay_ms` before emitting its single text-delta + done.
-/// Lets the spinner animate for the delay window before being stopped.
-fn delayed_stream(text: &'static str, delay_ms: u64) -> StreamFn {
+/// A faux stream that emits a thinking delta, then waits before emitting text + done.
+/// Lets the spinner animate while the model is still thinking.
+fn delayed_thinking_then_text_stream(
+    thinking: &'static str,
+    text: &'static str,
+    text_delay_ms: u64,
+) -> StreamFn {
     Arc::new(move |_, _, _| {
         let (stream, mut sender) = AssistantMessageEventStream::new();
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-            let msg = AssistantMessage {
+            let mut msg = AssistantMessage {
                 role: AssistantRole::Assistant,
-                content: vec![ContentBlock::text(text)],
+                content: vec![ContentBlock::Thinking(pie_ai::ThinkingContent {
+                    thinking: String::new(),
+                    thinking_signature: None,
+                    redacted: false,
+                })],
                 api: pie_ai::Api::from("faux"),
                 provider: pie_ai::Provider::from("faux"),
                 model: "faux".into(),
@@ -65,11 +72,22 @@ fn delayed_stream(text: &'static str, delay_ms: u64) -> StreamFn {
                 error_message: None,
                 timestamp: 0,
             };
-            // Start (no text yet) → then a single text delta → then done. The spinner
-            // listener should fire on the text delta.
             sender.push(AssistantMessageEvent::Start {
                 partial: msg.clone(),
             });
+            msg.content = vec![ContentBlock::Thinking(pie_ai::ThinkingContent {
+                thinking: thinking.to_string(),
+                thinking_signature: None,
+                redacted: false,
+            })];
+            sender.push(AssistantMessageEvent::ThinkingDelta {
+                content_index: 0,
+                delta: thinking.to_string(),
+                partial: msg.clone(),
+            });
+
+            tokio::time::sleep(Duration::from_millis(text_delay_ms)).await;
+            msg.content = vec![ContentBlock::text(text)];
             sender.push(AssistantMessageEvent::TextDelta {
                 content_index: 0,
                 delta: text.to_string(),
@@ -94,9 +112,7 @@ fn should_stop_on(ev: &AgentEvent) -> bool {
             ..
         } => matches!(
             assistant_message_event,
-            AssistantMessageEvent::TextDelta { .. }
-                | AssistantMessageEvent::ThinkingDelta { .. }
-                | AssistantMessageEvent::ToolCallDelta { .. }
+            AssistantMessageEvent::TextDelta { .. } | AssistantMessageEvent::ToolCallDelta { .. }
         ),
         _ => false,
     }
@@ -122,8 +138,13 @@ async fn spinner_shows_during_thinking_then_clears_on_first_delta() {
     let storage = Arc::new(MemorySessionStorage::new());
     let session = Session::new(storage as Arc<dyn SessionStorage>);
     let mut opts = AgentHarnessOptions::new(faux_model(), session);
-    // 350ms delay before the LLM responds — enough for the spinner to draw a few frames.
-    opts.stream_fn = Some(delayed_stream("hello", 350));
+    // Text arrives only after a thinking delta and a delay — enough for the spinner to
+    // draw a few frames while the model is reasoning.
+    opts.stream_fn = Some(delayed_thinking_then_text_stream(
+        "considering",
+        "hello",
+        450,
+    ));
     let harness = AgentHarness::new(opts);
 
     let spin_for_listener = spin.clone();
@@ -136,14 +157,24 @@ async fn spinner_shows_during_thinking_then_clears_on_first_delta() {
         })
     }));
 
-    // Yield once + sleep so the spinner's animation task gets time to render frames
-    // before the agent's events arrive. (`tokio::test`'s default current_thread / single-
-    // worker runtime can otherwise let the prompt task poll-loop without ever ceding to
-    // the spinner's sleep-timer wake.)
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    let prompt_fut = harness.prompt("hi");
+    tokio::pin!(prompt_fut);
 
-    // Drive the prompt to completion.
-    harness.prompt("hi").await.unwrap();
+    tokio::select! {
+        res = &mut prompt_fut => panic!("prompt completed before delayed text: {res:?}"),
+        _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+    }
+
+    let before_more_frames = sink.as_string().len();
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    let after_more_frames = sink.as_string().len();
+    assert!(
+        after_more_frames > before_more_frames,
+        "spinner stopped during thinking; len stayed at {before_more_frames}"
+    );
+
+    // Drive the prompt to completion. The first text delta should stop the spinner.
+    prompt_fut.await.unwrap();
 
     // Inspect what was written to the spinner sink:
     let captured = sink.as_string();

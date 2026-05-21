@@ -20,6 +20,8 @@ use pie_ai::{
 struct RenderState {
     /// Streamed text emitted so far this turn (so we can decide when to insert a newline).
     text_open: bool,
+    /// True until the first non-whitespace text character is emitted for the current block.
+    trim_text_prefix: bool,
     /// True while a thinking block is being streamed.
     thinking_open: bool,
 }
@@ -127,10 +129,8 @@ impl Tui {
             AgentEvent::AgentStart => {
                 let mut s = self.state.lock();
                 s.text_open = false;
+                s.trim_text_prefix = true;
                 s.thinking_open = false;
-                drop(s);
-                let _ = write!(out, "{GREEN}pi> {RESET}");
-                let _ = out.flush();
             }
             AgentEvent::AgentEnd { .. } => {
                 // Close the open content line so the next REPL prompt isn't glued onto it.
@@ -142,7 +142,17 @@ impl Tui {
             } => match assistant_message_event {
                 AssistantMessageEvent::TextDelta { delta, .. } => {
                     self.close_thinking(out);
-                    self.state.lock().text_open = true;
+                    let should_trim = self.state.lock().trim_text_prefix;
+                    let delta = if should_trim {
+                        delta.trim_start_matches(|c: char| c.is_ascii_whitespace())
+                    } else {
+                        delta.as_str()
+                    };
+                    if !delta.is_empty() {
+                        let mut s = self.state.lock();
+                        s.text_open = true;
+                        s.trim_text_prefix = false;
+                    }
                     let _ = write!(out, "{delta}");
                     let _ = out.flush();
                 }
@@ -195,7 +205,9 @@ impl Tui {
     fn close_text(&self, out: &mut dyn std::io::Write) {
         if self.state.lock().text_open {
             let _ = writeln!(out);
-            self.state.lock().text_open = false;
+            let mut s = self.state.lock();
+            s.text_open = false;
+            s.trim_text_prefix = true;
         }
     }
 
@@ -209,7 +221,6 @@ impl Tui {
 // `Write` impl (so the test capture can use a `Vec<u8>`).
 const RESET: &str = "\x1b[0m";
 const ITALIC: &str = "\x1b[3m";
-const GREEN: &str = "\x1b[32m";
 const YELLOW: &str = "\x1b[33m";
 const RED: &str = "\x1b[31m";
 const DARK_GREY: &str = "\x1b[90m";
@@ -281,9 +292,7 @@ pub fn render_persisted(message: &AgentMessage) {
             }
         }
         AgentMessage::Llm(Message::Assistant(a)) => {
-            let _ = out.execute(SetForegroundColor(Color::Green));
-            let _ = out.execute(Print("\npi> "));
-            let _ = out.execute(ResetColor);
+            let _ = out.execute(Print("\n"));
             for b in &a.content {
                 match b {
                     ContentBlock::Text(t) => {

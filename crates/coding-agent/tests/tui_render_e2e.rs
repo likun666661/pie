@@ -118,6 +118,10 @@ fn renders_thinking_then_text_with_clean_transition() {
 
     // Thinking block is labeled and contains its content.
     assert!(plain.contains("[thinking] considering options"), "{plain}");
+    assert!(
+        !plain.contains("pi>"),
+        "assistant prompt marker should not render: {plain}"
+    );
     // Final text appears AFTER the thinking line, on its own line.
     let idx_thinking = plain.find("[thinking]").unwrap();
     let idx_answer = plain.find("the answer is 42").unwrap();
@@ -298,6 +302,117 @@ fn text_to_tool_to_text_transitions_have_clean_line_breaks() {
         between_result_second.contains('\n'),
         "result→second needs newline: {between_result_second:?}"
     );
+}
+
+#[test]
+fn pure_text_output_drops_single_prefix_space() {
+    let tui = tui::Tui::new();
+    let mut buf: Vec<u8> = Vec::new();
+
+    tui.render_event(&AgentEvent::AgentStart, &mut buf);
+    let partial = assistant(vec![ContentBlock::text("")]);
+    tui.render_event(
+        &message_update(
+            AssistantMessageEvent::TextDelta {
+                content_index: 0,
+                delta: " hello".into(),
+                partial: partial.clone(),
+            },
+            partial.clone(),
+        ),
+        &mut buf,
+    );
+    tui.render_event(
+        &message_update(
+            AssistantMessageEvent::TextDelta {
+                content_index: 0,
+                delta: " world".into(),
+                partial: partial.clone(),
+            },
+            partial,
+        ),
+        &mut buf,
+    );
+    tui.render_event(
+        &AgentEvent::AgentEnd {
+            messages: Vec::new(),
+        },
+        &mut buf,
+    );
+
+    let plain = strip_ansi(&String::from_utf8(buf).unwrap());
+    assert!(plain.starts_with("hello world"), "{plain:?}");
+}
+
+#[test]
+fn pure_text_output_drops_prefix_space_after_empty_delta() {
+    let tui = tui::Tui::new();
+    let mut buf: Vec<u8> = Vec::new();
+
+    tui.render_event(&AgentEvent::AgentStart, &mut buf);
+    let partial = assistant(vec![ContentBlock::text("")]);
+    tui.render_event(
+        &message_update(
+            AssistantMessageEvent::TextDelta {
+                content_index: 0,
+                delta: String::new(),
+                partial: partial.clone(),
+            },
+            partial.clone(),
+        ),
+        &mut buf,
+    );
+    tui.render_event(
+        &message_update(
+            AssistantMessageEvent::TextDelta {
+                content_index: 0,
+                delta: " dongxu!".into(),
+                partial: partial.clone(),
+            },
+            partial,
+        ),
+        &mut buf,
+    );
+    tui.render_event(
+        &AgentEvent::AgentEnd {
+            messages: Vec::new(),
+        },
+        &mut buf,
+    );
+
+    let plain = strip_ansi(&String::from_utf8(buf).unwrap());
+    assert!(plain.starts_with("dongxu!"), "{plain:?}");
+}
+
+#[test]
+fn pure_text_output_drops_prefix_whitespace_split_across_deltas() {
+    let tui = tui::Tui::new();
+    let mut buf: Vec<u8> = Vec::new();
+
+    tui.render_event(&AgentEvent::AgentStart, &mut buf);
+    let partial = assistant(vec![ContentBlock::text("")]);
+    for delta in [" ", "\n", "\t", " dongxu!"] {
+        tui.render_event(
+            &message_update(
+                AssistantMessageEvent::TextDelta {
+                    content_index: 0,
+                    delta: delta.into(),
+                    partial: partial.clone(),
+                },
+                partial.clone(),
+            ),
+            &mut buf,
+        );
+    }
+    tui.render_event(
+        &AgentEvent::AgentEnd {
+            messages: Vec::new(),
+        },
+        &mut buf,
+    );
+
+    let plain = strip_ansi(&String::from_utf8(buf).unwrap());
+    assert_eq!(plain, "dongxu!\n", "{plain:?}");
 }
 
 #[allow(dead_code)]

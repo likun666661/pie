@@ -13,7 +13,11 @@
 //!    task only checks the flag at frame boundaries (80ms); cleanup there would race
 //!    with renderer stdout writes.
 //!
-//! 3. **Stop on first content delta, not on `AgentStart`.** The caller wires this via
+//! 3. **Only the original handle auto-stops on drop.** Listener code clones the handle for
+//!    each event; those short-lived clones must be able to call `stop_sync()` explicitly
+//!    without stopping the spinner merely by going out of scope.
+//!
+//! 4. **Stop on first content delta, not on `AgentStart`.** The caller wires this via
 //!    [`should_stop_spinner_on`] in `main.rs`.
 //!
 //! Tests inject their own `SpinnerSink` so we can observe the exact byte stream the
@@ -72,11 +76,22 @@ impl SpinnerSink for BufferSink {
     }
 }
 
-#[derive(Clone)]
 pub struct SpinnerHandle {
     stop: Arc<AtomicBool>,
     sink: Arc<dyn SpinnerSink>,
     enabled: bool,
+    stop_on_drop: bool,
+}
+
+impl Clone for SpinnerHandle {
+    fn clone(&self) -> Self {
+        Self {
+            stop: self.stop.clone(),
+            sink: self.sink.clone(),
+            enabled: self.enabled,
+            stop_on_drop: false,
+        }
+    }
 }
 
 impl SpinnerHandle {
@@ -94,7 +109,9 @@ impl SpinnerHandle {
 
 impl Drop for SpinnerHandle {
     fn drop(&mut self) {
-        self.stop_sync();
+        if self.stop_on_drop {
+            self.stop_sync();
+        }
     }
 }
 
@@ -123,6 +140,7 @@ pub fn start_with(
             stop,
             sink,
             enabled,
+            stop_on_drop: true,
         };
     }
     let label = label.into();
@@ -147,6 +165,7 @@ pub fn start_with(
         stop,
         sink,
         enabled,
+        stop_on_drop: true,
     }
 }
 
@@ -210,6 +229,21 @@ mod tests {
         assert_eq!(
             after_first, after_second,
             "second stop_sync must be a no-op"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_clone_does_not_stop_owner() {
+        let sink = BufferSink::new();
+        let h = start_with("thinking", Arc::new(sink.clone()), true);
+        drop(h.clone());
+        let before = sink.as_string().len();
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        let after = sink.as_string().len();
+        h.stop_sync();
+        assert!(
+            after > before,
+            "dropping a temporary clone must not stop the spinner"
         );
     }
 

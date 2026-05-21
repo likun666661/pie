@@ -13,6 +13,7 @@ mod config;
 mod export;
 mod extensions;
 mod history;
+mod hooks;
 mod images;
 mod logging;
 mod lsp;
@@ -314,12 +315,24 @@ async fn run_repl(mut cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo)
             loaded_skills.diagnostics[0].message
         ));
     }
+    let (hook_model, hook_thinking) = {
+        let state = harness.agent().state();
+        (state.model.clone(), state.thinking_level)
+    };
+    let hooks = hooks::load(&cwd, session_id.clone(), hook_model.as_ref(), hook_thinking).await;
+    if !hooks.runner.is_empty() {
+        tui.system_line(&format!("hooks: loaded {} hook(s)", hooks.runner.len()));
+    }
+    for diag in &hooks.diagnostics {
+        tui.system_line(&format!("hooks: {diag}"));
+    }
     if let Some(ctx) = replay_context.as_ref() {
         replay_transcript(ctx, &tui);
     }
 
     // Wire the TUI listener so each prompt's events stream live.
     let _unsub = harness.agent().subscribe(tui.listener());
+    let _unsub_hooks = harness.agent().subscribe(hooks.runner.listener());
 
     let registry = commands::Registry::with_builtins();
 
@@ -457,8 +470,8 @@ async fn run_repl(mut cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo)
         history.append(input);
 
         // Active-prompt spinner. Starts BEFORE the prompt future, gets cancelled on the
-        // first event that means "the LLM is now producing output" — content deltas and
-        // tool executions. Not on AgentStart (fires before the LLM is contacted).
+        // first event that means "the LLM is producing user-visible output" — final text
+        // and tool executions. Keep it alive while reasoning/thinking deltas stream.
         let spin = spinner::start("thinking");
         let spin_for_listener = spin.clone();
         let _unsub_spin = harness.agent().subscribe(std::sync::Arc::new(move |ev, _| {
@@ -517,9 +530,9 @@ async fn run_repl(mut cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo)
 }
 
 /// Predicate for spinner cancellation. The spinner should remain visible during the gap
-/// between user submission and "the LLM started producing output" — so we stop it on
-/// content deltas (text / thinking) and on tool execution start. AgentStart / MessageStart
-/// fire too early to be useful here.
+/// between user submission and user-visible output. Thinking deltas are still the model
+/// working, so the spinner stays animated until text/tool output starts. AgentStart /
+/// MessageStart fire too early to be useful here.
 fn should_stop_spinner_on(ev: &pie_agent_core::AgentEvent) -> bool {
     use pie_agent_core::AgentEvent;
     use pie_ai::AssistantMessageEvent;
@@ -530,9 +543,7 @@ fn should_stop_spinner_on(ev: &pie_agent_core::AgentEvent) -> bool {
             ..
         } => matches!(
             assistant_message_event,
-            AssistantMessageEvent::TextDelta { .. }
-                | AssistantMessageEvent::ThinkingDelta { .. }
-                | AssistantMessageEvent::ToolCallDelta { .. }
+            AssistantMessageEvent::TextDelta { .. } | AssistantMessageEvent::ToolCallDelta { .. }
         ),
         _ => false,
     }

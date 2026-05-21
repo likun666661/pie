@@ -1,0 +1,56 @@
+[package]
+name = "pie-agent-core"
+version = "0.75.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Rust port of @earendil-works/pie-agent-core — stateful agent runtime + harness (Agent loop, skills, prompt templates, sessions, compaction) on top of pie-ai."
+license = "MIT"
+repository = "https://github.com/earendil-works/pi"
+authors = ["earendil-works"]
+
+[lib]
+name = "pie_agent_core"
+path = "src/lib.rs"
+
+[features]
+default = ["harness", "native-env"]
+
+# Bare Agent + agent-loop. Always on.
+# Harness layer (skills, prompt templates, sessions, compaction, system prompt). Opt-out for
+# embedders that only want the bare Agent (e.g. browser-side consumers).
+harness = []
+# Native filesystem adapter (std::fs). Default for native targets; turn off for wasm.
+native-env = []
+
+[dependencies]
+pie-ai = { path = "../ai" }
+
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "fs", "io-util", "process"] }
+tokio-util = { version = "0.7", features = ["io"] }
+futures = "0.3"
+futures-core = "0.3"
+async-trait = "0.1"
+parking_lot = "0.12"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+serde_yaml = "0.9"
+
+thiserror = "2"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+uuid = { version = "1", features = ["v7", "serde"] }
+once_cell = "1"
+tracing = "0.1"
+ignore = "0.4"
+
+[dev-dependencies]
+anyhow = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
+
+[profile.dev]
+opt-level = 0
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

@@ -1,0 +1,66 @@
+//! pie-agent-core — Rust port of `@earendil-works/pie-agent-core`. Layered on top of `pie-ai`.
+//! 1:1 file mapping with the TypeScript source at `packages/agent/src/`.
+
+pub mod agent;
+pub mod agent_loop;
+pub mod node;
+pub mod proxy;
+pub mod types;
+
+#[cfg(feature = "harness")]
+pub mod harness;
+
+// Public surface — mirrors `packages/agent/src/index.ts`.
+pub use agent::{Agent, AgentListener, AgentOptions, AgentRunError};
+pub use types::{
+    AfterToolCallContext, AfterToolCallHook, AfterToolCallResult, AgentContext, AgentEvent,
+    AgentLoopConfig, AgentLoopTurnUpdate, AgentMessage, AgentState, AgentTool, AgentToolCall,
+    AgentToolError, AgentToolResult, AgentToolUpdate, BeforeToolCallContext, BeforeToolCallHook,
+    BeforeToolCallResult, ConvertToLlm, CustomMessage, GetApiKey, MessageQueueProvider,
+    PrepareNextTurnContext, PrepareNextTurnHook, QueueMode, ShouldStopAfterTurnContext,
+    ShouldStopHook, StreamFn, ThinkingLevel, ToolExecutionMode, TransformContext,
+    default_convert_to_llm,
+};
+
+#[cfg(feature = "harness")]
+pub use harness::{
+    agent_harness::{AgentHarness, AgentHarnessOptions},
+    compaction::{
+        branch_summarization::{summarize_branch, BranchSummaryResult},
+        compaction::{
+            calculate_context_tokens, compact, estimate_context_tokens, estimate_tokens,
+            find_cut_point, find_turn_start_index, generate_summary, get_last_assistant_usage,
+            prepare_compaction, serialize_conversation, should_compact, CompactionPreparation,
+            CompactionResult, CompactionSettings, ContextUsageEstimate, CutPointResult,
+            GenerateSummaryOutput, GenerateSummaryRequest, SummarizeError,
+            DEFAULT_COMPACTION_SETTINGS, SUMMARIZATION_SYSTEM_PROMPT,
+        },
+    },
+    messages,
+    session::{
+        jsonl_repo::JsonlSessionRepo,
+        jsonl_storage::JsonlSessionStorage,
+        memory_repo::MemorySessionRepo,
+        memory_storage::MemorySessionStorage,
+        repo_utils::{
+            create_session_id, create_timestamp, get_entries_to_fork, to_session, ForkOptions,
+            ForkPosition,
+        },
+        session::{
+            build_session_context, BranchSummaryInput, JsonlSessionMetadata, Session,
+            SessionContext, SessionContextModel, SessionMetadata, SessionStorage,
+            SessionTreeEntry,
+        },
+        uuid::uuidv7,
+    },
+    skills::{format_skill_invocation, load_skills, load_sourced_skills, LoadSkillsOutput},
+    system_prompt::format_skills_for_system_prompt,
+    types::{
+        ExecOptions, ExecOutput, ExecResult, ExecutionEnv, ExecutionError, ExecutionErrorCode,
+        FileError, FileErrorCode, FileInfo, FileKind, FsResult, PromptTemplate, SessionError,
+        SessionErrorCode, Skill, SkillDiagnostic, SkillDiagnosticCode, SkillFrontmatter,
+    },
+};
+
+#[cfg(all(feature = "harness", feature = "native-env"))]
+pub use harness::env::native::NativeEnv;

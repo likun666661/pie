@@ -8,6 +8,7 @@
 mod agent_session;
 mod commands;
 mod config;
+mod logging;
 mod model;
 mod session;
 mod skills;
@@ -126,6 +127,9 @@ async fn run_repl(cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo) -> 
         .unwrap_or("?")
         .to_string();
 
+    // Install the tracing subscriber. Failure is non-fatal — we keep running without logs.
+    let logging = logging::init(&session_id);
+
     // Build the harness.
     let memory_dir = config::memory_dir();
     let tools = tools::default_tools(memory_dir.clone());
@@ -234,7 +238,12 @@ async fn run_repl(cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo) -> 
         // affect REPL state, so we handle them here. Everything else falls through to a
         // prompt.
         if input.starts_with('/') {
-            let ctx = commands::CommandCtx { harness: &harness };
+            let ctx = commands::CommandCtx {
+                harness: &harness,
+                session_id: &session_id,
+                log_path: logging.as_ref().map(|l| &l.log_path),
+                tool_count: tool_names.len(),
+            };
             match commands::dispatch(input, &registry, &ctx).await {
                 commands::CommandOutcome::Quit => {
                     tui.system_line("bye");

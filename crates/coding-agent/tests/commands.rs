@@ -43,7 +43,12 @@ async fn dispatch_thinking_command_updates_state_and_session() {
     let harness = Arc::new(AgentHarness::new(opts));
 
     let registry = commands::Registry::with_builtins();
-    let ctx = commands::CommandCtx { harness: &harness };
+    let ctx = commands::CommandCtx {
+        harness: &harness,
+        session_id: "test",
+        log_path: None,
+        tool_count: 0,
+    };
 
     let outcome = commands::dispatch("/thinking high", &registry, &ctx).await;
     assert!(matches!(outcome, commands::CommandOutcome::Handled));
@@ -73,7 +78,12 @@ async fn dispatch_unknown_command_returns_error_outcome() {
     let harness = Arc::new(AgentHarness::new(opts));
 
     let registry = commands::Registry::with_builtins();
-    let ctx = commands::CommandCtx { harness: &harness };
+    let ctx = commands::CommandCtx {
+        harness: &harness,
+        session_id: "test",
+        log_path: None,
+        tool_count: 0,
+    };
     let outcome = commands::dispatch("/notarealcommand", &registry, &ctx).await;
     match outcome {
         commands::CommandOutcome::Error(msg) => assert!(msg.contains("unknown command")),
@@ -89,7 +99,12 @@ async fn dispatch_quit_returns_quit_outcome() {
     let harness = Arc::new(AgentHarness::new(opts));
 
     let registry = commands::Registry::with_builtins();
-    let ctx = commands::CommandCtx { harness: &harness };
+    let ctx = commands::CommandCtx {
+        harness: &harness,
+        session_id: "test",
+        log_path: None,
+        tool_count: 0,
+    };
 
     for input in ["/quit", "/exit", "/q"] {
         let outcome = commands::dispatch(input, &registry, &ctx).await;

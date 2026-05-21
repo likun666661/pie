@@ -4,6 +4,7 @@
 //! `/thinking`. The trait is shaped so future extensions (issue #10 Part B) can register
 //! additional commands without touching this file.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -27,6 +28,9 @@ pub enum CommandOutcome {
 /// explicit.
 pub struct CommandCtx<'a> {
     pub harness: &'a Arc<AgentHarness>,
+    pub session_id: &'a str,
+    pub log_path: Option<&'a PathBuf>,
+    pub tool_count: usize,
 }
 
 #[async_trait]
@@ -66,6 +70,7 @@ impl Registry {
         r.register(Arc::new(ModelCommand));
         r.register(Arc::new(ThinkingCommand));
         r.register(Arc::new(CostCommand));
+        r.register(Arc::new(DiagCommand));
         r
     }
 
@@ -337,6 +342,51 @@ impl SlashCommand for CostCommand {
         }
         let snap = ctx.harness.cost();
         println!("{}", pie_agent_core::cost_full_breakdown(&snap));
+        CommandOutcome::Handled
+    }
+}
+
+struct DiagCommand;
+
+#[async_trait]
+impl SlashCommand for DiagCommand {
+    fn name(&self) -> &'static str {
+        "diag"
+    }
+    fn description(&self) -> &'static str {
+        "show diagnostic info (model, thinking, cost, log path)"
+    }
+    async fn run(&self, _argv: &[String], ctx: &CommandCtx<'_>) -> CommandOutcome {
+        let state = ctx.harness.agent().state();
+        let model = state
+            .model
+            .as_ref()
+            .map(|m| format!("{}:{}", m.provider.0, m.id))
+            .unwrap_or_else(|| "(none)".into());
+        let thinking = state
+            .thinking_level
+            .map(|l| l.as_str())
+            .unwrap_or("?")
+            .to_string();
+        let skill_count = ctx.harness.skills().len();
+        let cost = ctx.harness.cost();
+        let log = ctx
+            .log_path
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(logging disabled)".into());
+        println!();
+        println!("Diagnostic snapshot:");
+        println!("  session       {}", ctx.session_id);
+        println!("  model         {model}");
+        println!("  thinking      {thinking}");
+        println!("  tools         {}", ctx.tool_count);
+        println!("  skills        {skill_count}");
+        println!(
+            "  cost          {}",
+            pie_agent_core::cost_one_line_summary(&cost)
+        );
+        println!("  log file      {log}");
+        println!();
         CommandOutcome::Handled
     }
 }

@@ -2,6 +2,7 @@
 //! `packages/ai/src/`. The barrel re-exports the public surface.
 
 pub mod api_registry;
+pub mod bedrock_anthropic;
 pub mod bedrock_provider;
 pub mod cli;
 pub mod env_api_keys;

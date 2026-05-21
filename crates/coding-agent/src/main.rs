@@ -22,8 +22,8 @@ use tokio::io::AsyncBufReadExt as _;
 use anyhow::{Context, Result};
 use clap::Parser;
 use pie_agent_core::{
-    AgentHarness, AgentHarnessOptions, AgentMessage, JsonlSessionRepo, SessionContext,
-    ThinkingLevel,
+    AgentHarness, AgentHarnessOptions, AgentMessage, JsonlSessionRepo, PermissionPolicy,
+    SessionContext, ThinkingLevel,
 };
 use pie_ai::Message as PiMessage;
 
@@ -138,6 +138,8 @@ async fn run_repl(cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo) -> 
     opts.thinking_level = thinking;
     opts.tools = tools;
     opts.skills = loaded_skills.skills.clone();
+    opts.before_tool_call =
+        Some(PermissionPolicy::default_for_coding_agent().as_before_tool_call());
     let harness = std::sync::Arc::new(AgentHarness::new(opts));
     let session_runner =
         agent_session::AgentSession::new(harness.clone(), agent_session::RetrySettings::default());

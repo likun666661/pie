@@ -37,6 +37,7 @@ pub use harness::{
         },
     },
     messages,
+    permission::{PermissionDecision, PermissionPolicy},
     session::{
         jsonl_repo::JsonlSessionRepo,
         jsonl_storage::JsonlSessionStorage,

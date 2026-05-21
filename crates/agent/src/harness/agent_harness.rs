@@ -76,6 +76,9 @@ pub struct AgentHarnessOptions {
     pub stream_fn: Option<StreamFn>,
     /// Auto-compaction thresholds. Defaults to [`DEFAULT_COMPACTION_SETTINGS`].
     pub compaction: CompactionSettings,
+    /// Optional `before_tool_call` hook. Wire a `PermissionPolicy::as_before_tool_call()` here
+    /// to apply danger-detection to tool calls before the loop runs them.
+    pub before_tool_call: Option<BeforeToolCallHook>,
 }
 
 impl AgentHarnessOptions {
@@ -90,6 +93,7 @@ impl AgentHarnessOptions {
             session,
             stream_fn: None,
             compaction: DEFAULT_COMPACTION_SETTINGS.clone(),
+            before_tool_call: None,
         }
     }
 }
@@ -122,6 +126,7 @@ impl AgentHarness {
         let agent = Agent::new(AgentOptions {
             initial_state: Some(state),
             stream_fn: options.stream_fn.clone(),
+            before_tool_call: options.before_tool_call.clone(),
             ..Default::default()
         });
 

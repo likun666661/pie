@@ -20,8 +20,7 @@ pub const CLOUDFLARE_AI_GATEWAY_OPENAI_BASE_URL: &str =
     "https://gateway.ai.cloudflare.com/v1/{CLOUDFLARE_ACCOUNT_ID}/{CLOUDFLARE_GATEWAY_ID}/openai";
 
 /// AI Gateway → Anthropic passthrough.
-pub const CLOUDFLARE_AI_GATEWAY_ANTHROPIC_BASE_URL: &str =
-    "https://gateway.ai.cloudflare.com/v1/{CLOUDFLARE_ACCOUNT_ID}/{CLOUDFLARE_GATEWAY_ID}/anthropic";
+pub const CLOUDFLARE_AI_GATEWAY_ANTHROPIC_BASE_URL: &str = "https://gateway.ai.cloudflare.com/v1/{CLOUDFLARE_ACCOUNT_ID}/{CLOUDFLARE_GATEWAY_ID}/anthropic";
 
 pub fn is_cloudflare_provider(provider: &str) -> bool {
     provider == "cloudflare-workers-ai" || provider == "cloudflare-ai-gateway"
@@ -86,7 +85,10 @@ mod tests {
     #[test]
     fn passthrough_when_no_placeholder() {
         let m = model_with_base("https://example.com/v1");
-        assert_eq!(resolve_cloudflare_base_url(&m).unwrap(), "https://example.com/v1");
+        assert_eq!(
+            resolve_cloudflare_base_url(&m).unwrap(),
+            "https://example.com/v1"
+        );
     }
 
     #[test]

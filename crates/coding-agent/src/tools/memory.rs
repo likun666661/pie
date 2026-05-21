@@ -70,7 +70,9 @@ impl AgentTool for MemoryTool {
         let action = params
             .get("action")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| AgentToolError::from("missing `action` (save | list | read | forget)"))?;
+            .ok_or_else(|| {
+                AgentToolError::from("missing `action` (save | list | read | forget)")
+            })?;
         tokio::fs::create_dir_all(&self.dir)
             .await
             .map_err(|e| AgentToolError::from(format!("memory dir: {e}")))?;
@@ -99,7 +101,10 @@ impl MemoryTool {
             .get("content")
             .and_then(|v| v.as_str())
             .ok_or_else(|| AgentToolError::from("missing `content`"))?;
-        let kind = params.get("type").and_then(|v| v.as_str()).unwrap_or("user");
+        let kind = params
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("user");
 
         let slug = slugify(name);
         if slug.is_empty() {
@@ -139,8 +144,10 @@ impl MemoryTool {
             Err(e) => return Err(AgentToolError::from(format!("list memories: {e}"))),
         };
         let mut names = Vec::new();
-        while let Some(entry) =
-            rd.next_entry().await.map_err(|e| AgentToolError::from(format!("read: {e}")))?
+        while let Some(entry) = rd
+            .next_entry()
+            .await
+            .map_err(|e| AgentToolError::from(format!("read: {e}")))?
         {
             let name = entry.file_name().to_string_lossy().into_owned();
             if name.ends_with(".md") && name != "MEMORY.md" {
@@ -197,9 +204,15 @@ impl MemoryTool {
     }
 }
 
-async fn update_index(dir: &std::path::Path, slug: &str, description: &str) -> Result<(), AgentToolError> {
+async fn update_index(
+    dir: &std::path::Path,
+    slug: &str,
+    description: &str,
+) -> Result<(), AgentToolError> {
     let index_path = dir.join("MEMORY.md");
-    let existing = tokio::fs::read_to_string(&index_path).await.unwrap_or_default();
+    let existing = tokio::fs::read_to_string(&index_path)
+        .await
+        .unwrap_or_default();
     let line = format!("- [{slug}]({slug}.md) — {description}\n");
     let mut out = String::with_capacity(existing.len() + line.len());
     let mut replaced = false;
@@ -263,7 +276,9 @@ pub async fn load_memory_block(dir: &std::path::Path) -> String {
             block.push_str(
                 "Persistent cross-session memory. These notes were saved in prior conversations and may be helpful. ",
             );
-            block.push_str("Use the `memory` tool with action=save to add more, action=forget to remove.\n\n");
+            block.push_str(
+                "Use the `memory` tool with action=save to add more, action=forget to remove.\n\n",
+            );
         }
         block.push_str(&format!("--- {name} ---\n"));
         block.push_str(body.trim());
@@ -277,7 +292,8 @@ pub async fn load_memory_block(dir: &std::path::Path) -> String {
 }
 
 use once_cell::sync::Lazy;
-static DEFINITION: Lazy<Tool> = Lazy::new(|| Tool {
+static DEFINITION: Lazy<Tool> = Lazy::new(|| {
+    Tool {
     name: "memory".into(),
     description:
         "Persistent cross-session memory. action=save (requires name/description/content/optional type), action=list, action=read (requires name), action=forget (requires name). Saved entries are auto-injected into the system prompt of future sessions."
@@ -297,4 +313,5 @@ static DEFINITION: Lazy<Tool> = Lazy::new(|| Tool {
         },
         "required": ["action"],
     }),
+}
 });

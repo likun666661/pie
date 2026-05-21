@@ -60,8 +60,10 @@ impl ApiProvider for MistralProvider {
             .map(|o| {
                 let mut base = o.base.clone();
                 if let (true, Some(level)) = (model.reasoning, o.reasoning) {
-                    base.provider_extras
-                        .insert("reasoning_effort".to_string(), json!(reasoning_effort(level)));
+                    base.provider_extras.insert(
+                        "reasoning_effort".to_string(),
+                        json!(reasoning_effort(level)),
+                    );
                 }
                 base
             })
@@ -84,7 +86,11 @@ fn normalize_tool_call_id(id: &str) -> String {
     if normalized.len() == MISTRAL_TOOL_CALL_ID_LENGTH {
         return normalized;
     }
-    let seed = if normalized.is_empty() { id } else { &normalized };
+    let seed = if normalized.is_empty() {
+        id
+    } else {
+        &normalized
+    };
     short_hash(seed)
         .chars()
         .filter(|c| c.is_ascii_alphanumeric())
@@ -149,12 +155,18 @@ async fn run(
     if !resp.status().is_success() {
         let status = resp.status();
         let txt = resp.text().await.unwrap_or_default();
-        push_error(&mut sender, &model, format!("Mistral API error ({status}): {txt}"));
+        push_error(
+            &mut sender,
+            &model,
+            format!("Mistral API error ({status}): {txt}"),
+        );
         return;
     }
 
     let mut partial = empty_partial(&model);
-    sender.push(AssistantMessageEvent::Start { partial: partial.clone() });
+    sender.push(AssistantMessageEvent::Start {
+        partial: partial.clone(),
+    });
 
     let mut text_index: Option<usize> = None;
     let mut tool_content_index: Option<usize> = None;
@@ -187,8 +199,10 @@ async fn run(
         if let Some(u) = chunk.get("usage").filter(|v| !v.is_null()) {
             update_usage(&mut partial.usage, u);
         }
-        let Some(choice) =
-            chunk.get("choices").and_then(|c| c.as_array()).and_then(|c| c.first())
+        let Some(choice) = chunk
+            .get("choices")
+            .and_then(|c| c.as_array())
+            .and_then(|c| c.first())
         else {
             continue;
         };
@@ -229,7 +243,10 @@ async fn run(
             for tc in tcs {
                 if tool_content_index.is_none() {
                     let id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                    let name = tc.pointer("/function/name").and_then(|v| v.as_str()).unwrap_or("");
+                    let name = tc
+                        .pointer("/function/name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
                     let i = partial.content.len();
                     partial.content.push(ContentBlock::ToolCall(ToolCall {
                         id: normalize_tool_call_id(id),
@@ -293,7 +310,10 @@ async fn run(
         StopReason::Length => DoneReason::Length,
         _ => DoneReason::Stop,
     };
-    sender.push(AssistantMessageEvent::Done { reason, message: partial });
+    sender.push(AssistantMessageEvent::Done {
+        reason,
+        message: partial,
+    });
 }
 
 fn update_usage(usage: &mut Usage, u: &Value) {
@@ -395,7 +415,11 @@ fn convert_messages(msgs: &[Message]) -> Vec<Value> {
                     }
                 }
                 let mut msg = json!({ "role": "assistant" });
-                msg["content"] = if text.is_empty() { json!("") } else { json!(text) };
+                msg["content"] = if text.is_empty() {
+                    json!("")
+                } else {
+                    json!(text)
+                };
                 if !tool_calls.is_empty() {
                     msg["tool_calls"] = json!(tool_calls);
                 }
@@ -444,7 +468,10 @@ fn push_error(sender: &mut AssistantMessageEventSender, model: &Model, msg: Stri
     let mut p = empty_partial(model);
     p.stop_reason = StopReason::Error;
     p.error_message = Some(msg);
-    sender.push(AssistantMessageEvent::Error { reason: ErrorReason::Error, error: p });
+    sender.push(AssistantMessageEvent::Error {
+        reason: ErrorReason::Error,
+        error: p,
+    });
 }
 
 #[cfg(test)]

@@ -4,14 +4,13 @@
 use std::sync::Arc;
 
 use pie_agent_core::{
-    AgentHarness, AgentHarnessOptions, MemorySessionStorage, Session, SessionStorage,
-    StreamFn, Skill, ThinkingLevel,
+    AgentHarness, AgentHarnessOptions, MemorySessionStorage, Session, SessionStorage, Skill,
+    StreamFn, ThinkingLevel,
 };
 use pie_ai::{
     AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream, AssistantRole,
     ContentBlock, DoneReason, ModelCost, StopReason, Usage,
 };
-use tokio::sync::Mutex;
 
 fn faux_model() -> pie_ai::Model {
     pie_ai::Model {
@@ -49,7 +48,9 @@ fn faux_stream_fn(text: &'static str) -> StreamFn {
                 error_message: None,
                 timestamp: 0,
             };
-            sender.push(AssistantMessageEvent::Start { partial: msg.clone() });
+            sender.push(AssistantMessageEvent::Start {
+                partial: msg.clone(),
+            });
             sender.push(AssistantMessageEvent::Done {
                 reason: DoneReason::Stop,
                 message: msg,
@@ -74,11 +75,20 @@ async fn prompt_persists_user_and_assistant_to_session() {
 
     let entries = session.entries().await.unwrap();
     // Should contain: user message + assistant message (both AgentMessage::Llm).
-    assert!(entries.len() >= 2, "expected at least 2 entries, got {}", entries.len());
-    let has_assistant = entries.iter().any(|e| matches!(
-        e,
-        pie_agent_core::SessionTreeEntry::Message { message: pie_agent_core::AgentMessage::Llm(pie_ai::Message::Assistant(_)), .. }
-    ));
+    assert!(
+        entries.len() >= 2,
+        "expected at least 2 entries, got {}",
+        entries.len()
+    );
+    let has_assistant = entries.iter().any(|e| {
+        matches!(
+            e,
+            pie_agent_core::SessionTreeEntry::Message {
+                message: pie_agent_core::AgentMessage::Llm(pie_ai::Message::Assistant(_)),
+                ..
+            }
+        )
+    });
     assert!(has_assistant);
 }
 
@@ -120,7 +130,10 @@ async fn set_model_persists_to_session() {
     let mut model_b = faux_model();
     model_b.id = "faux-v2".into();
     harness.set_model(model_b.clone()).await.unwrap();
-    harness.set_thinking_level(pie_agent_core::ThinkingLevel::Medium).await.unwrap();
+    harness
+        .set_thinking_level(pie_agent_core::ThinkingLevel::Medium)
+        .await
+        .unwrap();
 
     let entries = session.entries().await.unwrap();
     assert!(entries.iter().any(|e| matches!(e,
@@ -160,5 +173,9 @@ async fn prompt_from_template_interpolates_and_runs() {
         } => matches!(&u.content, pie_ai::UserContent::Text(s) if s == "Say hi to world"),
         _ => false,
     });
-    assert!(has_interpolated, "expected interpolated user message; entries={:#?}", entries);
+    assert!(
+        has_interpolated,
+        "expected interpolated user message; entries={:#?}",
+        entries
+    );
 }

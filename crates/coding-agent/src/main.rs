@@ -22,7 +22,11 @@ use pie_agent_core::{
 use pie_ai::Message as PiMessage;
 
 #[derive(Parser, Debug)]
-#[command(name = "pie", version, about = "Simple coding agent on top of pie-agent-core")]
+#[command(
+    name = "pie",
+    version,
+    about = "Simple coding agent on top of pie-agent-core"
+)]
 struct Cli {
     /// Provider id (anthropic, openai, openrouter, …). When unset, auto-detected from env.
     #[arg(long)]
@@ -74,7 +78,12 @@ async fn list_sessions_cmd(repo: &JsonlSessionRepo) -> Result<()> {
     println!("sessions in {}:", repo.root().display());
     for e in entries {
         let preview = e.preview.as_deref().unwrap_or("");
-        println!("  {}  {}  {}", &e.id[..16.min(e.id.len())], e.created_at, preview);
+        println!(
+            "  {}  {}  {}",
+            &e.id[..16.min(e.id.len())],
+            e.created_at,
+            preview
+        );
     }
     Ok(())
 }
@@ -117,10 +126,8 @@ async fn run_repl(cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo) -> 
     opts.thinking_level = thinking;
     opts.tools = tools;
     let harness = std::sync::Arc::new(AgentHarness::new(opts));
-    let session_runner = agent_session::AgentSession::new(
-        harness.clone(),
-        agent_session::RetrySettings::default(),
-    );
+    let session_runner =
+        agent_session::AgentSession::new(harness.clone(), agent_session::RetrySettings::default());
 
     // Banner + replay (if --resume).
     let tui = tui::Tui::new();
@@ -195,9 +202,9 @@ fn compose_system_prompt(cwd: &std::path::Path, memory: &str) -> String {
     s.push_str("\n\n");
     s.push_str(&format!("Current working directory: {}\n", cwd.display()));
     if !memory.is_empty() {
-        s.push_str("\n");
+        s.push('\n');
         s.push_str(memory);
-        s.push_str("\n");
+        s.push('\n');
     }
     s
 }
@@ -217,7 +224,10 @@ async fn replay_transcript(
     if ctx.messages.is_empty() {
         return Ok(());
     }
-    tui.system_line(&format!("resumed — replaying {} messages", ctx.messages.len()));
+    tui.system_line(&format!(
+        "resumed — replaying {} messages",
+        ctx.messages.len()
+    ));
     // Hydrate the Agent state so the next prompt continues from this transcript.
     {
         let mut state = harness.agent().state();

@@ -9,9 +9,7 @@ use pie_ai::{Model, Usage};
 use tokio_util::sync::CancellationToken;
 
 use super::super::session::session::SessionTreeEntry;
-use super::compaction::{
-    generate_summary, GenerateSummaryRequest, SummarizeError,
-};
+use super::compaction::{GenerateSummaryRequest, SummarizeError, generate_summary};
 use crate::types::{AgentMessage, StreamFn};
 
 const BRANCH_SUMMARY_INSTRUCTIONS: &str = "Produce a concise branch summary of the conversation below. Capture the goal of this branch, what was accomplished, and the most recent state so a sibling branch can pick up without replaying every message.";
@@ -36,7 +34,10 @@ pub async fn summarize_branch(
         })
         .collect();
     if messages.is_empty() {
-        return Ok(BranchSummaryResult { summary: String::new(), usage: Usage::default() });
+        return Ok(BranchSummaryResult {
+            summary: String::new(),
+            usage: Usage::default(),
+        });
     }
     let out = generate_summary(
         GenerateSummaryRequest {
@@ -48,5 +49,8 @@ pub async fn summarize_branch(
         cancel,
     )
     .await?;
-    Ok(BranchSummaryResult { summary: out.summary, usage: out.usage })
+    Ok(BranchSummaryResult {
+        summary: out.summary,
+        usage: out.usage,
+    })
 }

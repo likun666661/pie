@@ -12,7 +12,7 @@ use pie_ai::{Tool, UserContentBlock};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use super::truncate::{truncate_head, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES};
+use super::truncate::{DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, truncate_head};
 
 pub struct ReadTool;
 

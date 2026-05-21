@@ -67,7 +67,8 @@ impl ApiProvider for OpenAICodexResponsesProvider {
                         ThinkingLevel::Medium => "medium",
                         ThinkingLevel::High | ThinkingLevel::Xhigh => "high",
                     };
-                    base.provider_extras.insert("reasoning_effort".to_string(), json!(effort));
+                    base.provider_extras
+                        .insert("reasoning_effort".to_string(), json!(effort));
                 }
                 base
             })
@@ -77,7 +78,11 @@ impl ApiProvider for OpenAICodexResponsesProvider {
 }
 
 fn resolve_codex_url(base_url: &str) -> String {
-    let raw = if base_url.trim().is_empty() { DEFAULT_CODEX_BASE_URL } else { base_url };
+    let raw = if base_url.trim().is_empty() {
+        DEFAULT_CODEX_BASE_URL
+    } else {
+        base_url
+    };
     let normalized = raw.trim_end_matches('/');
     if normalized.ends_with("/codex/responses") {
         normalized.to_string()
@@ -158,7 +163,11 @@ async fn run(
     if !resp.status().is_success() {
         let status = resp.status();
         let txt = resp.text().await.unwrap_or_default();
-        push_error(&mut sender, &model, format!("Codex API error ({status}): {txt}"));
+        push_error(
+            &mut sender,
+            &model,
+            format!("Codex API error ({status}): {txt}"),
+        );
         return;
     }
 
@@ -219,10 +228,22 @@ mod tests {
 
     #[test]
     fn url_resolution() {
-        assert_eq!(resolve_codex_url(""), "https://chatgpt.com/backend-api/codex/responses");
-        assert_eq!(resolve_codex_url("https://x/backend-api"), "https://x/backend-api/codex/responses");
-        assert_eq!(resolve_codex_url("https://x/codex"), "https://x/codex/responses");
-        assert_eq!(resolve_codex_url("https://x/codex/responses"), "https://x/codex/responses");
+        assert_eq!(
+            resolve_codex_url(""),
+            "https://chatgpt.com/backend-api/codex/responses"
+        );
+        assert_eq!(
+            resolve_codex_url("https://x/backend-api"),
+            "https://x/backend-api/codex/responses"
+        );
+        assert_eq!(
+            resolve_codex_url("https://x/codex"),
+            "https://x/codex/responses"
+        );
+        assert_eq!(
+            resolve_codex_url("https://x/codex/responses"),
+            "https://x/codex/responses"
+        );
     }
 
     #[test]

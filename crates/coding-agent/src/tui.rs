@@ -8,11 +8,13 @@
 use std::io::Write as _;
 use std::sync::Arc;
 
-use crossterm::style::{Color, Print, ResetColor, SetAttribute, SetForegroundColor, Attribute};
+use crossterm::style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor};
 use crossterm::{ExecutableCommand, QueueableCommand};
 use parking_lot::Mutex;
 use pie_agent_core::{AgentEvent, AgentListener, AgentMessage};
-use pie_ai::{AssistantMessageEvent, ContentBlock, ImageContent, Message, UserContent, UserContentBlock};
+use pie_ai::{
+    AssistantMessageEvent, ContentBlock, ImageContent, Message, UserContent, UserContentBlock,
+};
 
 #[derive(Default)]
 struct RenderState {
@@ -29,7 +31,9 @@ pub struct Tui {
 
 impl Tui {
     pub fn new() -> Self {
-        Self { state: Arc::new(Mutex::new(RenderState::default())) }
+        Self {
+            state: Arc::new(Mutex::new(RenderState::default())),
+        }
     }
 
     pub fn banner(&self, model: &pie_ai::Model, session_id: &str, resumed: bool) {
@@ -41,7 +45,10 @@ impl Tui {
             "model:   {} ({}/{})",
             model.name, model.provider.0, model.id
         );
-        println!("session: {session_id}{}", if resumed { "  [resumed]" } else { "" });
+        println!(
+            "session: {session_id}{}",
+            if resumed { "  [resumed]" } else { "" }
+        );
         println!("tools:   read, write, bash, ls, memory");
         println!("type a message and press Enter. Ctrl-C to quit.\n");
     }
@@ -94,51 +101,66 @@ impl Tui {
             AgentEvent::AgentEnd { .. } => {
                 let _ = out.execute(Print("\n"));
             }
-            AgentEvent::MessageUpdate { assistant_message_event, .. } => {
-                match assistant_message_event {
-                    AssistantMessageEvent::TextDelta { delta, .. } => {
-                        if self.state.lock().thinking_open {
-                            let _ = out.queue(SetAttribute(Attribute::Reset));
-                            let _ = out.queue(Print("\n"));
-                            self.state.lock().thinking_open = false;
-                        }
-                        self.state.lock().text_open = true;
-                        let _ = out.execute(Print(delta));
+            AgentEvent::MessageUpdate {
+                assistant_message_event,
+                ..
+            } => match assistant_message_event {
+                AssistantMessageEvent::TextDelta { delta, .. } => {
+                    if self.state.lock().thinking_open {
+                        let _ = out.queue(SetAttribute(Attribute::Reset));
+                        let _ = out.queue(Print("\n"));
+                        self.state.lock().thinking_open = false;
                     }
-                    AssistantMessageEvent::ThinkingDelta { delta, .. } => {
-                        if !self.state.lock().thinking_open {
-                            let _ = out.queue(SetForegroundColor(Color::DarkGrey));
-                            let _ = out.queue(SetAttribute(Attribute::Italic));
-                            let _ = out.queue(Print("\n[thinking] "));
-                            self.state.lock().thinking_open = true;
-                        }
-                        let _ = out.execute(Print(delta));
-                    }
-                    AssistantMessageEvent::ToolCallStart { partial, content_index } => {
-                        if self.state.lock().thinking_open {
-                            let _ = out.queue(SetAttribute(Attribute::Reset));
-                            let _ = out.queue(Print("\n"));
-                            self.state.lock().thinking_open = false;
-                        }
-                        if let Some(ContentBlock::ToolCall(tc)) = partial.content.get(*content_index) {
-                            let _ = out.queue(SetForegroundColor(Color::Yellow));
-                            let _ = out.queue(Print(format!("\n⚙ {}", tc.name)));
-                            let _ = out.queue(ResetColor);
-                            let _ = out.flush();
-                        }
-                    }
-                    _ => {}
+                    self.state.lock().text_open = true;
+                    let _ = out.execute(Print(delta));
                 }
-            }
-            AgentEvent::ToolExecutionStart { tool_name, args, .. } => {
+                AssistantMessageEvent::ThinkingDelta { delta, .. } => {
+                    if !self.state.lock().thinking_open {
+                        let _ = out.queue(SetForegroundColor(Color::DarkGrey));
+                        let _ = out.queue(SetAttribute(Attribute::Italic));
+                        let _ = out.queue(Print("\n[thinking] "));
+                        self.state.lock().thinking_open = true;
+                    }
+                    let _ = out.execute(Print(delta));
+                }
+                AssistantMessageEvent::ToolCallStart {
+                    partial,
+                    content_index,
+                } => {
+                    if self.state.lock().thinking_open {
+                        let _ = out.queue(SetAttribute(Attribute::Reset));
+                        let _ = out.queue(Print("\n"));
+                        self.state.lock().thinking_open = false;
+                    }
+                    if let Some(ContentBlock::ToolCall(tc)) = partial.content.get(*content_index) {
+                        let _ = out.queue(SetForegroundColor(Color::Yellow));
+                        let _ = out.queue(Print(format!("\n⚙ {}", tc.name)));
+                        let _ = out.queue(ResetColor);
+                        let _ = out.flush();
+                    }
+                }
+                _ => {}
+            },
+            AgentEvent::ToolExecutionStart {
+                tool_name, args, ..
+            } => {
                 let arg_preview = preview(args);
                 let _ = out.queue(SetForegroundColor(Color::Yellow));
                 let _ = out.queue(Print(format!("\n  ⚙ {tool_name}{arg_preview}\n")));
                 let _ = out.queue(ResetColor);
                 let _ = out.flush();
             }
-            AgentEvent::ToolExecutionEnd { tool_name: _, result, is_error, .. } => {
-                let color = if *is_error { Color::Red } else { Color::DarkGreen };
+            AgentEvent::ToolExecutionEnd {
+                tool_name: _,
+                result,
+                is_error,
+                ..
+            } => {
+                let color = if *is_error {
+                    Color::Red
+                } else {
+                    Color::DarkGreen
+                };
                 let _ = out.queue(SetForegroundColor(color));
                 for block in &result.content {
                     if let UserContentBlock::Text(t) = block {
@@ -233,7 +255,11 @@ pub fn render_persisted(message: &AgentMessage) {
                     }
                     ContentBlock::ToolCall(tc) => {
                         let _ = out.execute(SetForegroundColor(Color::Yellow));
-                        let _ = out.execute(Print(format!("⚙ {}({})\n", tc.name, preview(&serde_json::Value::Object(tc.arguments.clone())))));
+                        let _ = out.execute(Print(format!(
+                            "⚙ {}({})\n",
+                            tc.name,
+                            preview(&serde_json::Value::Object(tc.arguments.clone()))
+                        )));
                         let _ = out.execute(ResetColor);
                     }
                     ContentBlock::Image(_) => {}
@@ -241,7 +267,11 @@ pub fn render_persisted(message: &AgentMessage) {
             }
         }
         AgentMessage::Llm(Message::ToolResult(tr)) => {
-            let color = if tr.is_error { Color::Red } else { Color::DarkGreen };
+            let color = if tr.is_error {
+                Color::Red
+            } else {
+                Color::DarkGreen
+            };
             let _ = out.execute(SetForegroundColor(color));
             let _ = out.execute(Print(format!("  ⤷ {} →\n", tr.tool_name)));
             for b in &tr.content {

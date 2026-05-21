@@ -48,9 +48,5 @@ anyhow = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
 
-[profile.dev]
-opt-level = 0
-
-[profile.release]
-lto = "thin"
-codegen-units = 1
+[lints]
+workspace = true

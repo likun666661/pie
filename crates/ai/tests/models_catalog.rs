@@ -6,7 +6,11 @@ use pie_ai::{Provider, get_model, list_apis, list_models};
 #[test]
 fn catalog_is_populated() {
     let all = list_models();
-    assert!(all.len() > 100, "catalog has {} entries — expected hundreds", all.len());
+    assert!(
+        all.len() > 100,
+        "catalog has {} entries — expected hundreds",
+        all.len()
+    );
 }
 
 #[test]

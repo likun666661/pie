@@ -26,14 +26,14 @@ pub use types::{
 pub use harness::{
     agent_harness::{AgentHarness, AgentHarnessOptions},
     compaction::{
-        branch_summarization::{summarize_branch, BranchSummaryResult},
+        branch_summarization::{BranchSummaryResult, summarize_branch},
         compaction::{
+            CompactionPreparation, CompactionResult, CompactionSettings, ContextUsageEstimate,
+            CutPointResult, DEFAULT_COMPACTION_SETTINGS, GenerateSummaryOutput,
+            GenerateSummaryRequest, SUMMARIZATION_SYSTEM_PROMPT, SummarizeError,
             calculate_context_tokens, compact, estimate_context_tokens, estimate_tokens,
             find_cut_point, find_turn_start_index, generate_summary, get_last_assistant_usage,
-            prepare_compaction, serialize_conversation, should_compact, CompactionPreparation,
-            CompactionResult, CompactionSettings, ContextUsageEstimate, CutPointResult,
-            GenerateSummaryOutput, GenerateSummaryRequest, SummarizeError,
-            DEFAULT_COMPACTION_SETTINGS, SUMMARIZATION_SYSTEM_PROMPT,
+            prepare_compaction, serialize_conversation, should_compact,
         },
     },
     messages,
@@ -43,17 +43,16 @@ pub use harness::{
         memory_repo::MemorySessionRepo,
         memory_storage::MemorySessionStorage,
         repo_utils::{
-            create_session_id, create_timestamp, get_entries_to_fork, to_session, ForkOptions,
-            ForkPosition,
+            ForkOptions, ForkPosition, create_session_id, create_timestamp, get_entries_to_fork,
+            to_session,
         },
         session::{
-            build_session_context, BranchSummaryInput, JsonlSessionMetadata, Session,
-            SessionContext, SessionContextModel, SessionMetadata, SessionStorage,
-            SessionTreeEntry,
+            BranchSummaryInput, JsonlSessionMetadata, Session, SessionContext, SessionContextModel,
+            SessionMetadata, SessionStorage, SessionTreeEntry, build_session_context,
         },
         uuid::uuidv7,
     },
-    skills::{format_skill_invocation, load_skills, load_sourced_skills, LoadSkillsOutput},
+    skills::{LoadSkillsOutput, format_skill_invocation, load_skills, load_sourced_skills},
     system_prompt::format_skills_for_system_prompt,
     types::{
         ExecOptions, ExecOutput, ExecResult, ExecutionEnv, ExecutionError, ExecutionErrorCode,

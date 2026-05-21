@@ -55,8 +55,7 @@ fn resolve_compat(model: &Model) -> Compat {
     let provider = model.provider.0.as_str();
     let base_url = model.base_url.as_str();
     let is_fireworks = provider == "fireworks";
-    let is_cf_anthropic =
-        provider == "cloudflare-ai-gateway" && base_url.contains("anthropic");
+    let is_cf_anthropic = provider == "cloudflare-ai-gateway" && base_url.contains("anthropic");
 
     // model.compat is an opaque JSON value carrying the AnthropicMessagesCompat shape.
     let compat = model.compat.as_ref();
@@ -251,7 +250,9 @@ async fn run(
     }
 
     let mut partial = empty_partial(&model);
-    sender.push(AssistantMessageEvent::Start { partial: partial.clone() });
+    sender.push(AssistantMessageEvent::Start {
+        partial: partial.clone(),
+    });
 
     let mut sse = SseStream::new(resp.bytes_stream());
     while let Some(item) = sse.next().await {
@@ -272,7 +273,10 @@ async fn run(
     }
 
     partial.stop_reason = StopReason::Stop;
-    sender.push(AssistantMessageEvent::Done { reason: DoneReason::Stop, message: partial });
+    sender.push(AssistantMessageEvent::Done {
+        reason: DoneReason::Stop,
+        message: partial,
+    });
 }
 
 // ────────────────────────────────────────────────────────────────────────────────────────────
@@ -288,9 +292,10 @@ fn handle_sse(
     let Ok(payload): Result<Value, _> = serde_json::from_str(&ev.data) else {
         return true;
     };
-    let kind = ev.event.as_deref().unwrap_or_else(|| {
-        payload.get("type").and_then(|v| v.as_str()).unwrap_or("")
-    });
+    let kind = ev
+        .event
+        .as_deref()
+        .unwrap_or_else(|| payload.get("type").and_then(|v| v.as_str()).unwrap_or(""));
     match kind {
         "message_start" => {
             if let Some(u) = payload.pointer("/message/usage") {
@@ -304,8 +309,9 @@ fn handle_sse(
         "content_block_delta" => on_content_block_delta(&payload, partial, sender),
         "content_block_stop" => on_content_block_stop(&payload, partial, sender),
         "message_delta" => {
-            if let Some(reason) =
-                payload.pointer("/delta/stop_reason").and_then(|v| v.as_str())
+            if let Some(reason) = payload
+                .pointer("/delta/stop_reason")
+                .and_then(|v| v.as_str())
             {
                 partial.stop_reason = map_stop_reason(reason);
             }
@@ -360,7 +366,11 @@ fn on_content_block_start(
             });
         }
         "thinking" => {
-            ensure_block(partial, idx, ContentBlock::Thinking(ThinkingContent::default()));
+            ensure_block(
+                partial,
+                idx,
+                ContentBlock::Thinking(ThinkingContent::default()),
+            );
             sender.push(AssistantMessageEvent::ThinkingStart {
                 content_index: idx,
                 partial: partial.clone(),
@@ -465,7 +475,8 @@ fn on_content_block_stop(
     if let Some(ContentBlock::ToolCall(tc)) = partial.content.get_mut(idx) {
         let assembled = collect_tool_args_from_events(idx, sender);
         if !assembled.is_empty() {
-            if let Ok(Value::Object(map)) = crate::utils::json_parse::parse_partial_json(&assembled) {
+            if let Ok(Value::Object(map)) = crate::utils::json_parse::parse_partial_json(&assembled)
+            {
                 tc.arguments = map;
             }
         }
@@ -502,10 +513,7 @@ fn on_content_block_stop(
 /// on the partial's `ToolCall::arguments` (serialized as text). For the moment we accept that
 /// arguments are populated only when the delta payloads come through here; downstream
 /// consumers see the assembled object via the `tool_call` block in `ToolCallEnd`.
-fn collect_tool_args_from_events(
-    _idx: usize,
-    _sender: &AssistantMessageEventSender,
-) -> String {
+fn collect_tool_args_from_events(_idx: usize, _sender: &AssistantMessageEventSender) -> String {
     // TODO: thread the accumulated `partial_json` chunks through `partial.content[idx]` once
     // we extend ContentBlock::ToolCall with a raw-args buffer. For now we rely on consumers
     // reading the per-event deltas.
@@ -539,7 +547,10 @@ fn update_usage(usage: &mut Usage, val: &Value) {
     if let Some(n) = val.get("cache_read_input_tokens").and_then(|v| v.as_u64()) {
         usage.cache_read += n;
     }
-    if let Some(n) = val.get("cache_creation_input_tokens").and_then(|v| v.as_u64()) {
+    if let Some(n) = val
+        .get("cache_creation_input_tokens")
+        .and_then(|v| v.as_u64())
+    {
         usage.cache_write += n;
     }
     usage.total_tokens = usage.input + usage.output + usage.cache_read + usage.cache_write;
@@ -635,7 +646,9 @@ fn serialize_tools(tools: &[Tool], cc: Option<&Value>, compat: &Compat) -> Vec<V
 }
 
 fn convert_messages(msgs: &[Message], cc: Option<&Value>) -> Vec<Value> {
-    let last_user_idx = msgs.iter().rposition(|m| matches!(m, Message::User(_) | Message::ToolResult(_)));
+    let last_user_idx = msgs
+        .iter()
+        .rposition(|m| matches!(m, Message::User(_) | Message::ToolResult(_)));
     let mut out = Vec::with_capacity(msgs.len());
     for (i, m) in msgs.iter().enumerate() {
         let apply_cc = cc.filter(|_| Some(i) == last_user_idx);
@@ -742,7 +755,10 @@ fn push_error(sender: &mut AssistantMessageEventSender, model: &Model, msg: Stri
     let mut p = empty_partial(model);
     p.stop_reason = StopReason::Error;
     p.error_message = Some(msg);
-    sender.push(AssistantMessageEvent::Error { reason: ErrorReason::Error, error: p });
+    sender.push(AssistantMessageEvent::Error {
+        reason: ErrorReason::Error,
+        error: p,
+    });
 }
 
 #[cfg(test)]
@@ -802,8 +818,7 @@ mod tests {
             "first user should not have cache_control"
         );
         assert_eq!(
-            msgs[1]["content"][0]["cache_control"]["type"],
-            "ephemeral",
+            msgs[1]["content"][0]["cache_control"]["type"], "ephemeral",
             "last user should have cache_control"
         );
     }
@@ -849,7 +864,10 @@ mod tests {
             json!({ "type": "enabled", "budget_tokens": 4096 }),
         );
         let body = build_request_body(&m, &ctx, &opts, &resolve_compat(&m)).unwrap();
-        assert!(body.get("temperature").is_none(), "temperature must be dropped");
+        assert!(
+            body.get("temperature").is_none(),
+            "temperature must be dropped"
+        );
         assert_eq!(body["thinking"]["type"], "enabled");
     }
 
@@ -883,7 +901,10 @@ mod tests {
         };
         let body = build_request_body(&m, &ctx, &opts, &resolve_compat(&m)).unwrap();
         let tools_v = body["tools"].as_array().unwrap();
-        assert!(tools_v[0].get("cache_control").is_none(), "first tool should not have cc");
+        assert!(
+            tools_v[0].get("cache_control").is_none(),
+            "first tool should not have cc"
+        );
         assert_eq!(tools_v[1]["cache_control"]["type"], "ephemeral");
     }
 

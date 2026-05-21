@@ -14,9 +14,7 @@ use tokio::fs::{self, OpenOptions};
 use tokio::io::AsyncWriteExt;
 
 use super::super::types::{SessionError, SessionErrorCode};
-use super::session::{
-    JsonlSessionMetadata, SessionMetadata, SessionStorage, SessionTreeEntry,
-};
+use super::session::{JsonlSessionMetadata, SessionMetadata, SessionStorage, SessionTreeEntry};
 use super::uuid::uuidv7;
 
 pub struct JsonlSessionStorage {
@@ -53,7 +51,11 @@ impl JsonlSessionStorage {
         }
         let header = serde_json::to_string(&metadata).map_err(json_err)? + "\n";
         fs::write(&path, header).await.map_err(io_err)?;
-        Ok(Self { path, metadata, cache: Mutex::new(Some(Vec::new())) })
+        Ok(Self {
+            path,
+            metadata,
+            cache: Mutex::new(Some(Vec::new())),
+        })
     }
 
     /// Open an existing session file. Parses the header to recover metadata.
@@ -65,13 +67,16 @@ impl JsonlSessionStorage {
             code: SessionErrorCode::Corrupted,
             message: format!("{} is empty", path.display()),
         })?;
-        let metadata: JsonlSessionMetadata = serde_json::from_str(header_line).map_err(|e| {
-            SessionError {
+        let metadata: JsonlSessionMetadata =
+            serde_json::from_str(header_line).map_err(|e| SessionError {
                 code: SessionErrorCode::Corrupted,
                 message: format!("invalid header in {}: {e}", path.display()),
-            }
-        })?;
-        Ok(Self { path, metadata, cache: Mutex::new(None) })
+            })?;
+        Ok(Self {
+            path,
+            metadata,
+            cache: Mutex::new(None),
+        })
     }
 
     pub fn path(&self) -> &PathBuf {
@@ -129,11 +134,17 @@ impl JsonlSessionStorage {
 }
 
 fn io_err(e: std::io::Error) -> SessionError {
-    SessionError { code: SessionErrorCode::StorageFailure, message: e.to_string() }
+    SessionError {
+        code: SessionErrorCode::StorageFailure,
+        message: e.to_string(),
+    }
 }
 
 fn json_err(e: serde_json::Error) -> SessionError {
-    SessionError { code: SessionErrorCode::Corrupted, message: e.to_string() }
+    SessionError {
+        code: SessionErrorCode::Corrupted,
+        message: e.to_string(),
+    }
 }
 
 #[async_trait]
@@ -175,7 +186,11 @@ impl SessionStorage for JsonlSessionStorage {
     }
 
     async fn get_entry(&self, id: &str) -> Result<Option<SessionTreeEntry>, SessionError> {
-        Ok(self.load_entries().await?.into_iter().find(|e| e.id() == id))
+        Ok(self
+            .load_entries()
+            .await?
+            .into_iter()
+            .find(|e| e.id() == id))
     }
 
     async fn get_entries(&self) -> Result<Vec<SessionTreeEntry>, SessionError> {
@@ -213,10 +228,7 @@ impl SessionStorage for JsonlSessionStorage {
         Ok(chain)
     }
 
-    async fn find_entries(
-        &self,
-        entry_type: &str,
-    ) -> Result<Vec<SessionTreeEntry>, SessionError> {
+    async fn find_entries(&self, entry_type: &str) -> Result<Vec<SessionTreeEntry>, SessionError> {
         Ok(self
             .load_entries()
             .await?
@@ -228,7 +240,10 @@ impl SessionStorage for JsonlSessionStorage {
     async fn get_label(&self, id: &str) -> Result<Option<String>, SessionError> {
         let mut latest: Option<String> = None;
         for entry in self.load_entries().await? {
-            if let SessionTreeEntry::Label { target_id, label, .. } = entry {
+            if let SessionTreeEntry::Label {
+                target_id, label, ..
+            } = entry
+            {
                 if target_id == id {
                     latest = label;
                 }

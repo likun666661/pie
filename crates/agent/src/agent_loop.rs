@@ -36,7 +36,14 @@ pub(crate) async fn run_agent_loop(
 
     for msg in new_messages.into_iter() {
         inner.state.lock().messages.push(msg.clone());
-        emit(&inner, AgentEvent::MessageStart { message: msg.clone() }, &cancel).await;
+        emit(
+            &inner,
+            AgentEvent::MessageStart {
+                message: msg.clone(),
+            },
+            &cancel,
+        )
+        .await;
         emit(&inner, AgentEvent::MessageEnd { message: msg }, &cancel).await;
     }
 
@@ -82,14 +89,25 @@ async fn drive_loop(
         };
         let assistant_agent = AgentMessage::Llm(PiMessage::Assistant(assistant.clone()));
         inner.state.lock().messages.push(assistant_agent.clone());
-        emit(inner, AgentEvent::MessageEnd { message: assistant_agent.clone() }, &cancel).await;
+        emit(
+            inner,
+            AgentEvent::MessageEnd {
+                message: assistant_agent.clone(),
+            },
+            &cancel,
+        )
+        .await;
 
-        let (tool_results, all_terminate) =
-            execute_tools(inner, &assistant, &cancel).await;
+        let (tool_results, all_terminate) = execute_tools(inner, &assistant, &cancel).await;
         for tr in &tool_results {
             let m = AgentMessage::Llm(PiMessage::ToolResult(tr.clone()));
             inner.state.lock().messages.push(m.clone());
-            emit(inner, AgentEvent::MessageStart { message: m.clone() }, &cancel).await;
+            emit(
+                inner,
+                AgentEvent::MessageStart { message: m.clone() },
+                &cancel,
+            )
+            .await;
             emit(inner, AgentEvent::MessageEnd { message: m }, &cancel).await;
         }
 
@@ -142,7 +160,14 @@ async fn drive_loop(
         if !queued.is_empty() {
             for msg in queued {
                 inner.state.lock().messages.push(msg.clone());
-                emit(inner, AgentEvent::MessageStart { message: msg.clone() }, &cancel).await;
+                emit(
+                    inner,
+                    AgentEvent::MessageStart {
+                        message: msg.clone(),
+                    },
+                    &cancel,
+                )
+                .await;
                 emit(inner, AgentEvent::MessageEnd { message: msg }, &cancel).await;
             }
             continue;
@@ -186,7 +211,12 @@ async fn call_llm(
         let model = g.model.clone().ok_or_else(|| {
             AgentRunError::Other("Agent has no model set; assign state.model first".into())
         })?;
-        (g.system_prompt.clone(), g.messages.clone(), g.tools.clone(), model)
+        (
+            g.system_prompt.clone(),
+            g.messages.clone(),
+            g.tools.clone(),
+            model,
+        )
     };
 
     // `transform_context` runs before convert_to_llm so callers can prune / inject ephemeral
@@ -200,18 +230,35 @@ async fn call_llm(
     let messages = inner.convert_to_llm(&agent_messages);
     let pi_tools: Vec<pie_ai::Tool> = tools.iter().map(|t| t.definition().clone()).collect();
     let context = PiContext {
-        system_prompt: if system_prompt.is_empty() { None } else { Some(system_prompt) },
+        system_prompt: if system_prompt.is_empty() {
+            None
+        } else {
+            Some(system_prompt)
+        },
         messages,
-        tools: if pi_tools.is_empty() { None } else { Some(pi_tools) },
+        tools: if pi_tools.is_empty() {
+            None
+        } else {
+            Some(pi_tools)
+        },
     };
 
-    let stream_fn = inner.options.stream_fn.clone().unwrap_or_else(default_stream_fn);
+    let stream_fn = inner
+        .options
+        .stream_fn
+        .clone()
+        .unwrap_or_else(default_stream_fn);
     let mut options = SimpleStreamOptions::default();
     if let Some(sid) = &inner.options.session_id {
         options.base.session_id = Some(sid.clone());
     }
     options.base.abort = Some(cancel.clone());
-    if let Some(level) = inner.state.lock().thinking_level.and_then(|l| l.to_pie_ai()) {
+    if let Some(level) = inner
+        .state
+        .lock()
+        .thinking_level
+        .and_then(|l| l.to_pie_ai())
+    {
         options.reasoning = Some(level);
     }
 
@@ -225,7 +272,12 @@ async fn call_llm(
             AssistantMessageEvent::Start { partial } => {
                 last_message = Some(partial.clone());
                 let m = AgentMessage::Llm(PiMessage::Assistant(partial.clone()));
-                emit(inner, AgentEvent::MessageStart { message: m.clone() }, cancel).await;
+                emit(
+                    inner,
+                    AgentEvent::MessageStart { message: m.clone() },
+                    cancel,
+                )
+                .await;
                 inner.state.lock().streaming_message = Some(m);
             }
             AssistantMessageEvent::TextDelta { partial, .. }
@@ -239,7 +291,10 @@ async fn call_llm(
                 inner.state.lock().streaming_message = Some(m.clone());
                 emit(
                     inner,
-                    AgentEvent::MessageUpdate { message: m, assistant_message_event: ev.clone() },
+                    AgentEvent::MessageUpdate {
+                        message: m,
+                        assistant_message_event: ev.clone(),
+                    },
                     cancel,
                 )
                 .await;
@@ -248,7 +303,7 @@ async fn call_llm(
                 last_message = Some(message.clone());
             }
             AssistantMessageEvent::Error { error, .. } => {
-                last_message = Some(error.clone());
+                // last_message would be overwritten by `return Err` below; don't bother.
                 let msg = error.error_message.clone().unwrap_or_default();
                 inner.state.lock().streaming_message = None;
                 return Err(AgentRunError::Other(msg));
@@ -285,13 +340,19 @@ async fn execute_tools(
     // Decide per-call execution mode (parallel default unless any tool requests sequential).
     let mode = inner.options.tool_execution;
     let any_sequential = tool_calls.iter().any(|tc| {
-        let matched = tools_snapshot.iter().find(|t| t.definition().name == tc.name);
+        let matched = tools_snapshot
+            .iter()
+            .find(|t| t.definition().name == tc.name);
         matched
             .and_then(|t| t.execution_mode())
             .map(|m| matches!(m, ToolExecutionMode::Sequential))
             .unwrap_or(false)
     });
-    let mode = if any_sequential { ToolExecutionMode::Sequential } else { mode };
+    let mode = if any_sequential {
+        ToolExecutionMode::Sequential
+    } else {
+        mode
+    };
 
     // Pre-flight: run `before_tool_call` for every call. If a hook blocks, synthesize an error
     // result and skip the actual execute. Returns Vec<Option<execute_input>> in call order.
@@ -323,8 +384,9 @@ async fn execute_tools(
             };
             let veto = hook(ctx, cancel.clone()).await;
             if veto.block {
-                let reason =
-                    veto.reason.unwrap_or_else(|| "tool call blocked by before_tool_call hook".to_string());
+                let reason = veto
+                    .reason
+                    .unwrap_or_else(|| "tool call blocked by before_tool_call hook".to_string());
                 let result = AgentToolResult {
                     content: vec![UserContentBlock::text(reason)],
                     details: serde_json::Value::Null,
@@ -344,7 +406,12 @@ async fn execute_tools(
             .iter()
             .find(|t| t.definition().name == tool_name)
             .cloned();
-        prepared.push(PreparedCall::Run { id: tool_id, name: tool_name, args, tool });
+        prepared.push(PreparedCall::Run {
+            id: tool_id,
+            name: tool_name,
+            args,
+            tool,
+        });
     }
 
     // Execute. For sequential we await one at a time; for parallel we spawn and join.
@@ -388,7 +455,13 @@ async fn execute_tools(
     let mut all_terminate = !outcomes.is_empty();
     let agent_context = snapshot_context(inner);
     for outcome in outcomes {
-        let ToolOutcome { id, name, args, mut result, mut is_error } = outcome;
+        let ToolOutcome {
+            id,
+            name,
+            args,
+            mut result,
+            mut is_error,
+        } = outcome;
 
         if let Some(hook) = inner.options.after_tool_call.clone() {
             let ctx = AfterToolCallContext {
@@ -473,12 +546,32 @@ struct ToolOutcome {
 
 async fn run_one(call: PreparedCall, cancel: CancellationToken) -> ToolOutcome {
     match call {
-        PreparedCall::Blocked { id, name, args, result } => {
-            ToolOutcome { id, name, args, result, is_error: true }
-        }
-        PreparedCall::Run { id, name, args, tool } => match tool {
+        PreparedCall::Blocked {
+            id,
+            name,
+            args,
+            result,
+        } => ToolOutcome {
+            id,
+            name,
+            args,
+            result,
+            is_error: true,
+        },
+        PreparedCall::Run {
+            id,
+            name,
+            args,
+            tool,
+        } => match tool {
             Some(t) => match t.execute(&id, args.clone(), cancel, None).await {
-                Ok(r) => ToolOutcome { id, name, args, result: r, is_error: false },
+                Ok(r) => ToolOutcome {
+                    id,
+                    name,
+                    args,
+                    result: r,
+                    is_error: false,
+                },
                 Err(e) => ToolOutcome {
                     id,
                     name,

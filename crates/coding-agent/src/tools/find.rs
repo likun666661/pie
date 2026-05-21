@@ -58,7 +58,10 @@ impl AgentTool for FindTool {
             tb.add("g", &glob_for_blocking).map_err(|e| e.to_string())?;
             tb.select("g");
             let types = tb.build().map_err(|e| e.to_string())?;
-            let walker = WalkBuilder::new(&path).standard_filters(true).types(types).build();
+            let walker = WalkBuilder::new(&path)
+                .standard_filters(true)
+                .types(types)
+                .build();
             let mut out = Vec::new();
             for entry in walker {
                 if cancel_clone.is_cancelled() {

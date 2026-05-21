@@ -65,7 +65,8 @@ impl ApiProvider for AzureOpenAIResponsesProvider {
                         ThinkingLevel::High => "high",
                         ThinkingLevel::Xhigh => "xhigh",
                     };
-                    base.provider_extras.insert("reasoning_effort".to_string(), json!(effort));
+                    base.provider_extras
+                        .insert("reasoning_effort".to_string(), json!(effort));
                 }
                 base
             })
@@ -76,7 +77,11 @@ impl ApiProvider for AzureOpenAIResponsesProvider {
 
 /// Resolve the Azure deployment name: explicit option, then the env name-map, then the model id.
 fn resolve_deployment_name(model: &Model, options: &StreamOptions) -> String {
-    if let Some(name) = options.provider_extras.get("azure_deployment_name").and_then(|v| v.as_str()) {
+    if let Some(name) = options
+        .provider_extras
+        .get("azure_deployment_name")
+        .and_then(|v| v.as_str())
+    {
         return name.to_string();
     }
     if let Ok(map) = std::env::var("AZURE_OPENAI_DEPLOYMENT_NAME_MAP") {
@@ -106,7 +111,11 @@ async fn run(
     {
         Some(k) => k,
         None => {
-            push_error(&mut sender, &model, "AZURE_OPENAI_API_KEY is not set".into());
+            push_error(
+                &mut sender,
+                &model,
+                "AZURE_OPENAI_API_KEY is not set".into(),
+            );
             return;
         }
     };
@@ -160,7 +169,11 @@ async fn run(
     if !resp.status().is_success() {
         let status = resp.status();
         let txt = resp.text().await.unwrap_or_default();
-        push_error(&mut sender, &model, format!("Azure OpenAI API error ({status}): {txt}"));
+        push_error(
+            &mut sender,
+            &model,
+            format!("Azure OpenAI API error ({status}): {txt}"),
+        );
         return;
     }
 

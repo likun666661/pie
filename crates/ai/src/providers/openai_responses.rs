@@ -213,7 +213,9 @@ pub(crate) async fn consume_responses_sse(
     sender: &mut AssistantMessageEventSender,
 ) {
     let mut partial = empty_partial(model);
-    sender.push(AssistantMessageEvent::Start { partial: partial.clone() });
+    sender.push(AssistantMessageEvent::Start {
+        partial: partial.clone(),
+    });
 
     let mut sse = SseStream::new(resp.bytes_stream());
     while let Some(item) = sse.next().await {
@@ -234,7 +236,10 @@ pub(crate) async fn consume_responses_sse(
     }
 
     partial.stop_reason = StopReason::Stop;
-    sender.push(AssistantMessageEvent::Done { reason: DoneReason::Stop, message: partial });
+    sender.push(AssistantMessageEvent::Done {
+        reason: DoneReason::Stop,
+        message: partial,
+    });
 }
 
 // ────────────────────────────────────────────────────────────────────────────────────────────
@@ -279,7 +284,10 @@ fn handle_event(
                 StopReason::Length => DoneReason::Length,
                 _ => DoneReason::Stop,
             };
-            sender.push(AssistantMessageEvent::Done { reason, message: partial.clone() });
+            sender.push(AssistantMessageEvent::Done {
+                reason,
+                message: partial.clone(),
+            });
             return false;
         }
         "response.failed" | "response.error" | "error" => {
@@ -311,7 +319,9 @@ fn on_output_item_added(
     match item["type"].as_str().unwrap_or("") {
         "reasoning" => {
             let idx = partial.content.len();
-            partial.content.push(ContentBlock::Thinking(ThinkingContent::default()));
+            partial
+                .content
+                .push(ContentBlock::Thinking(ThinkingContent::default()));
             sender.push(AssistantMessageEvent::ThinkingStart {
                 content_index: idx,
                 partial: partial.clone(),
@@ -371,7 +381,10 @@ fn on_text_done(
 ) {
     if let Some(ContentBlock::Text(tc)) = partial.content.last().cloned() {
         let idx = partial.content.len() - 1;
-        let text = payload["text"].as_str().map(|s| s.to_string()).unwrap_or(tc.text);
+        let text = payload["text"]
+            .as_str()
+            .map(|s| s.to_string())
+            .unwrap_or(tc.text);
         sender.push(AssistantMessageEvent::TextEnd {
             content_index: idx,
             content: text,
@@ -386,19 +399,24 @@ fn on_thinking_delta(
     sender: &mut AssistantMessageEventSender,
 ) {
     let delta = payload["delta"].as_str().unwrap_or("").to_string();
-    let idx =
-        match partial.content.iter().rposition(|b| matches!(b, ContentBlock::Thinking(_))) {
-            Some(i) => i,
-            None => {
-                let i = partial.content.len();
-                partial.content.push(ContentBlock::Thinking(ThinkingContent::default()));
-                sender.push(AssistantMessageEvent::ThinkingStart {
-                    content_index: i,
-                    partial: partial.clone(),
-                });
-                i
-            }
-        };
+    let idx = match partial
+        .content
+        .iter()
+        .rposition(|b| matches!(b, ContentBlock::Thinking(_)))
+    {
+        Some(i) => i,
+        None => {
+            let i = partial.content.len();
+            partial
+                .content
+                .push(ContentBlock::Thinking(ThinkingContent::default()));
+            sender.push(AssistantMessageEvent::ThinkingStart {
+                content_index: i,
+                partial: partial.clone(),
+            });
+            i
+        }
+    };
     if let Some(ContentBlock::Thinking(tc)) = partial.content.get_mut(idx) {
         tc.thinking.push_str(&delta);
     }
@@ -414,10 +432,15 @@ fn on_thinking_done(
     partial: &mut AssistantMessage,
     sender: &mut AssistantMessageEventSender,
 ) {
-    if let Some(idx) =
-        partial.content.iter().rposition(|b| matches!(b, ContentBlock::Thinking(_)))
+    if let Some(idx) = partial
+        .content
+        .iter()
+        .rposition(|b| matches!(b, ContentBlock::Thinking(_)))
     {
-        let content = payload["text"].as_str().map(|s| s.to_string()).unwrap_or_default();
+        let content = payload["text"]
+            .as_str()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
         sender.push(AssistantMessageEvent::ThinkingEnd {
             content_index: idx,
             content,
@@ -432,8 +455,10 @@ fn on_tool_args_delta(
     sender: &mut AssistantMessageEventSender,
 ) {
     let delta = payload["delta"].as_str().unwrap_or("").to_string();
-    if let Some(idx) =
-        partial.content.iter().rposition(|b| matches!(b, ContentBlock::ToolCall(_)))
+    if let Some(idx) = partial
+        .content
+        .iter()
+        .rposition(|b| matches!(b, ContentBlock::ToolCall(_)))
     {
         sender.push(AssistantMessageEvent::ToolCallDelta {
             content_index: idx,
@@ -448,8 +473,10 @@ fn on_tool_args_done(
     partial: &mut AssistantMessage,
     sender: &mut AssistantMessageEventSender,
 ) {
-    let Some(idx) =
-        partial.content.iter().rposition(|b| matches!(b, ContentBlock::ToolCall(_)))
+    let Some(idx) = partial
+        .content
+        .iter()
+        .rposition(|b| matches!(b, ContentBlock::ToolCall(_)))
     else {
         return;
     };
@@ -469,12 +496,19 @@ fn on_tool_args_done(
 }
 
 fn openai_stop_reason(payload: &Value) -> StopReason {
-    if let Some(items) = payload.pointer("/response/output").and_then(|v| v.as_array()) {
+    if let Some(items) = payload
+        .pointer("/response/output")
+        .and_then(|v| v.as_array())
+    {
         if items.iter().any(|i| i["type"] == "function_call") {
             return StopReason::ToolUse;
         }
     }
-    match payload.pointer("/response/status").and_then(|v| v.as_str()).unwrap_or("") {
+    match payload
+        .pointer("/response/status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+    {
         "incomplete" => StopReason::Length,
         _ => StopReason::Stop,
     }
@@ -487,8 +521,9 @@ fn update_usage(usage: &mut Usage, val: &Value) {
     if let Some(n) = val.get("output_tokens").and_then(|v| v.as_u64()) {
         usage.output += n;
     }
-    if let Some(n) =
-        val.pointer("/input_tokens_details/cached_tokens").and_then(|v| v.as_u64())
+    if let Some(n) = val
+        .pointer("/input_tokens_details/cached_tokens")
+        .and_then(|v| v.as_u64())
     {
         usage.cache_read += n;
     }
@@ -699,7 +734,10 @@ pub(crate) fn push_error(sender: &mut AssistantMessageEventSender, model: &Model
     let mut p = empty_partial(model);
     p.stop_reason = StopReason::Error;
     p.error_message = Some(msg);
-    sender.push(AssistantMessageEvent::Error { reason: ErrorReason::Error, error: p });
+    sender.push(AssistantMessageEvent::Error {
+        reason: ErrorReason::Error,
+        error: p,
+    });
 }
 
 #[cfg(test)]
@@ -726,9 +764,18 @@ mod tests {
 
     #[test]
     fn url_does_not_double_v1() {
-        assert_eq!(build_responses_url("https://api.openai.com"), "https://api.openai.com/v1/responses");
-        assert_eq!(build_responses_url("https://api.openai.com/v1"), "https://api.openai.com/v1/responses");
-        assert_eq!(build_responses_url("https://api.openai.com/v1/"), "https://api.openai.com/v1/responses");
+        assert_eq!(
+            build_responses_url("https://api.openai.com"),
+            "https://api.openai.com/v1/responses"
+        );
+        assert_eq!(
+            build_responses_url("https://api.openai.com/v1"),
+            "https://api.openai.com/v1/responses"
+        );
+        assert_eq!(
+            build_responses_url("https://api.openai.com/v1/"),
+            "https://api.openai.com/v1/responses"
+        );
         // Cloudflare AI Gateway sticks `/openai` segment in front of `/v1`.
         assert_eq!(
             build_responses_url("https://gateway.example.com/acct/gw/openai"),
@@ -789,7 +836,8 @@ mod tests {
             tools: None,
         };
         let mut opts = StreamOptions::default();
-        opts.provider_extras.insert("reasoning_effort".into(), json!("high"));
+        opts.provider_extras
+            .insert("reasoning_effort".into(), json!("high"));
         let body = build_request_body(&m, &ctx, &opts, &resolve_compat(&m)).unwrap();
         assert_eq!(body["reasoning"]["effort"], "high");
         assert_eq!(body["reasoning"]["summary"], "auto");

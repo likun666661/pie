@@ -50,7 +50,11 @@ pub struct FileError {
 
 impl FileError {
     pub fn new(code: FileErrorCode, message: impl Into<String>) -> Self {
-        Self { code, message: message.into(), path: None }
+        Self {
+            code,
+            message: message.into(),
+            path: None,
+        }
     }
 
     pub fn with_path(mut self, path: impl Into<String>) -> Self {
@@ -77,7 +81,10 @@ pub struct ExecutionError {
 
 impl ExecutionError {
     pub fn new(code: ExecutionErrorCode, message: impl Into<String>) -> Self {
-        Self { code, message: message.into() }
+        Self {
+            code,
+            message: message.into(),
+        }
     }
 }
 

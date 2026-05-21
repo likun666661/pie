@@ -15,18 +15,16 @@
 //! - more nuanced char→token weights for image/tool blocks (currently flat)
 //! - `serialize_conversation` formatting parity with TS (used inside summarization prompts)
 
-use std::sync::Arc;
-
 use futures::StreamExt;
 use pie_ai::{
     AssistantMessage, AssistantMessageEvent, Context as PiContext, Message as PiMessage, Model,
-    SimpleStreamOptions, ToolResultMessage, Usage,
+    SimpleStreamOptions, Usage,
 };
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
-use super::super::super::types::*;
 use super::super::super::types::default_stream_fn;
+use super::super::super::types::*;
 use super::super::session::session::SessionTreeEntry;
 
 // ──────────────────────────────────────────────────────────────────────────────────────────
@@ -68,8 +66,13 @@ pub fn calculate_context_tokens(usage: &Usage) -> u64 {
 }
 
 fn assistant_usage(msg: &AgentMessage) -> Option<&Usage> {
-    let AgentMessage::Llm(PiMessage::Assistant(a)) = msg else { return None };
-    if matches!(a.stop_reason, pie_ai::StopReason::Aborted | pie_ai::StopReason::Error) {
+    let AgentMessage::Llm(PiMessage::Assistant(a)) = msg else {
+        return None;
+    };
+    if matches!(
+        a.stop_reason,
+        pie_ai::StopReason::Aborted | pie_ai::StopReason::Error
+    ) {
         return None;
     }
     if a.usage.total_tokens == 0
@@ -123,7 +126,7 @@ pub fn estimate_tokens(message: &AgentMessage) -> u64 {
         }
     }
     // Round up: ~4 chars per token.
-    ((chars + 3) / 4) as u64
+    chars.div_ceil(4) as u64
 }
 
 fn user_block_chars(b: &pie_ai::UserContentBlock) -> usize {
@@ -141,7 +144,10 @@ fn content_block_chars(b: &pie_ai::ContentBlock) -> usize {
         pie_ai::ContentBlock::Thinking(t) => t.thinking.len(),
         pie_ai::ContentBlock::Image(_) => 3072,
         pie_ai::ContentBlock::ToolCall(tc) => {
-            tc.name.len() + serde_json::Value::Object(tc.arguments.clone()).to_string().len()
+            tc.name.len()
+                + serde_json::Value::Object(tc.arguments.clone())
+                    .to_string()
+                    .len()
         }
     }
 }
@@ -240,7 +246,10 @@ pub fn find_cut_point(
     settings: &CompactionSettings,
 ) -> CutPointResult {
     if entries.is_empty() {
-        return CutPointResult { cut_index: 0, first_kept_entry_id: None };
+        return CutPointResult {
+            cut_index: 0,
+            first_kept_entry_id: None,
+        };
     }
     // Walk backward summing tokens until we've kept `keep_recent_tokens`, then back up to the
     // turn boundary above that.
@@ -257,7 +266,10 @@ pub fn find_cut_point(
     }
     let cut = find_turn_start_index(entries, target, 0);
     let first_kept_entry_id = entries.get(cut).map(|e| e.id().to_string());
-    CutPointResult { cut_index: cut, first_kept_entry_id }
+    CutPointResult {
+        cut_index: cut,
+        first_kept_entry_id,
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────────────────
@@ -377,7 +389,9 @@ pub async fn generate_summary(
             AssistantMessageEvent::Done { message, .. } => last = Some(message),
             AssistantMessageEvent::Error { error, .. } => {
                 return Err(SummarizeError::Provider(
-                    error.error_message.unwrap_or_else(|| "summarization failed".into()),
+                    error
+                        .error_message
+                        .unwrap_or_else(|| "summarization failed".into()),
                 ));
             }
             _ => {}
@@ -393,7 +407,10 @@ pub async fn generate_summary(
         })
         .collect::<Vec<_>>()
         .join("");
-    Ok(GenerateSummaryOutput { summary, usage: msg.usage })
+    Ok(GenerateSummaryOutput {
+        summary,
+        usage: msg.usage,
+    })
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -432,7 +449,11 @@ pub fn prepare_compaction(
             _ => None,
         })
         .sum();
-    CompactionPreparation { cut, entries_to_summarize, tokens_before }
+    CompactionPreparation {
+        cut,
+        entries_to_summarize,
+        tokens_before,
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -520,7 +541,11 @@ mod tests {
 
     #[test]
     fn should_compact_when_over_threshold() {
-        let s = CompactionSettings { enabled: true, reserve_tokens: 1024, keep_recent_tokens: 0 };
+        let s = CompactionSettings {
+            enabled: true,
+            reserve_tokens: 1024,
+            keep_recent_tokens: 0,
+        };
         // Threshold is window - reserve = 126_976.
         assert!(should_compact(127_000, 128_000, &s));
         assert!(!should_compact(80_000, 128_000, &s));
@@ -528,7 +553,10 @@ mod tests {
 
     #[test]
     fn disabled_compaction_returns_false() {
-        let s = CompactionSettings { enabled: false, ..Default::default() };
+        let s = CompactionSettings {
+            enabled: false,
+            ..Default::default()
+        };
         assert!(!should_compact(1_000_000, 128_000, &s));
     }
 
@@ -539,7 +567,12 @@ mod tests {
             assistant(
                 "ok",
                 pie_ai::StopReason::Stop,
-                Usage { input: 100, output: 50, total_tokens: 150, ..Default::default() },
+                Usage {
+                    input: 100,
+                    output: 50,
+                    total_tokens: 150,
+                    ..Default::default()
+                },
             ),
             user("more"),
         ];
@@ -582,14 +615,16 @@ mod tests {
         ];
         let cut = find_cut_point(
             &entries,
-            &CompactionSettings { keep_recent_tokens: 1, ..Default::default() },
+            &CompactionSettings {
+                keep_recent_tokens: 1,
+                ..Default::default()
+            },
         );
         // Should land on a turn boundary, i.e., a user message or 0.
         if cut.cut_index < entries.len() {
             if let SessionTreeEntry::Message { message, .. } = &entries[cut.cut_index] {
                 assert!(
-                    matches!(message, AgentMessage::Llm(PiMessage::User(_)))
-                        || cut.cut_index == 0
+                    matches!(message, AgentMessage::Llm(PiMessage::User(_))) || cut.cut_index == 0
                 );
             }
         }

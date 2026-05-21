@@ -60,8 +60,8 @@ impl AgentTool for WriteTool {
 use once_cell::sync::Lazy;
 static DEFINITION: Lazy<Tool> = Lazy::new(|| Tool {
     name: "write".into(),
-    description: "Write (or overwrite) a UTF-8 text file. Parent directories are created if missing."
-        .into(),
+    description:
+        "Write (or overwrite) a UTF-8 text file. Parent directories are created if missing.".into(),
     parameters: json!({
         "type": "object",
         "properties": {

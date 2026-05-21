@@ -12,7 +12,8 @@ pub use crate::env_api_keys::get_env_api_key;
 
 fn resolve(model: &Model) -> Result<crate::api_registry::RegisteredHandle, String> {
     crate::providers::register_builtins::ensure();
-    get_api_provider(&model.api).ok_or_else(|| format!("No API provider registered for api: {}", model.api.0))
+    get_api_provider(&model.api)
+        .ok_or_else(|| format!("No API provider registered for api: {}", model.api.0))
 }
 
 pub fn stream(

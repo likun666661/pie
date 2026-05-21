@@ -57,8 +57,9 @@ impl AgentTool for GrepTool {
 
         let mut builder = regex::RegexBuilder::new(pattern);
         builder.case_insensitive(case_insensitive);
-        let re: Regex =
-            builder.build().map_err(|e| AgentToolError::from(format!("regex: {e}")))?;
+        let re: Regex = builder
+            .build()
+            .map_err(|e| AgentToolError::from(format!("regex: {e}")))?;
 
         // Walk synchronously inside spawn_blocking so .gitignore + sibling files are honored
         // by `ignore` and we don't block the runtime.

@@ -75,8 +75,10 @@ impl ApiProvider for OpenAICompletionsProvider {
             .map(|o| {
                 let mut base = o.base.clone();
                 if let Some(level) = o.reasoning {
-                    base.provider_extras
-                        .insert("reasoning_effort".to_string(), json!(reasoning_effort(level)));
+                    base.provider_extras.insert(
+                        "reasoning_effort".to_string(),
+                        json!(reasoning_effort(level)),
+                    );
                 }
                 base
             })
@@ -122,7 +124,11 @@ async fn run(
     {
         Some(k) => k,
         None => {
-            push_error(&mut sender, &model, format!("no API key for provider: {}", model.provider.0));
+            push_error(
+                &mut sender,
+                &model,
+                format!("no API key for provider: {}", model.provider.0),
+            );
             return;
         }
     };
@@ -170,7 +176,9 @@ async fn run(
     }
 
     let mut partial = empty_partial(&model);
-    sender.push(AssistantMessageEvent::Start { partial: partial.clone() });
+    sender.push(AssistantMessageEvent::Start {
+        partial: partial.clone(),
+    });
 
     // Streaming accumulation state.
     let mut text_index: Option<usize> = None;
@@ -211,7 +219,10 @@ async fn run(
             update_usage(&mut partial.usage, u);
         }
 
-        let Some(choice) = chunk.get("choices").and_then(|c| c.as_array()).and_then(|c| c.first())
+        let Some(choice) = chunk
+            .get("choices")
+            .and_then(|c| c.as_array())
+            .and_then(|c| c.first())
         else {
             continue;
         };
@@ -257,7 +268,9 @@ async fn run(
                 if !r.is_empty() {
                     let idx = *thinking_index.get_or_insert_with(|| {
                         let i = partial.content.len();
-                        partial.content.push(ContentBlock::Thinking(ThinkingContent::default()));
+                        partial
+                            .content
+                            .push(ContentBlock::Thinking(ThinkingContent::default()));
                         i
                     });
                     let is_first = matches!(
@@ -295,7 +308,10 @@ async fn run(
                         arguments: Map::new(),
                         thought_signature: None,
                     }));
-                    ToolAccum { content_index, ..Default::default() }
+                    ToolAccum {
+                        content_index,
+                        ..Default::default()
+                    }
                 });
                 let is_new = entry.id.is_empty() && entry.name.is_empty() && entry.args.is_empty();
                 if let Some(id) = tc.get("id").and_then(|v| v.as_str()) {
@@ -369,12 +385,17 @@ async fn run(
         }
     }
 
-    let stop = finish_reason.as_deref().map(map_stop_reason).unwrap_or(StopReason::Stop);
+    let stop = finish_reason
+        .as_deref()
+        .map(map_stop_reason)
+        .unwrap_or(StopReason::Stop);
     partial.stop_reason = stop;
     match stop {
         StopReason::Error => {
-            partial.error_message =
-                Some(format!("Provider finish_reason: {}", finish_reason.unwrap_or_default()));
+            partial.error_message = Some(format!(
+                "Provider finish_reason: {}",
+                finish_reason.unwrap_or_default()
+            ));
             sender.push(AssistantMessageEvent::Error {
                 reason: ErrorReason::Error,
                 error: partial,
@@ -386,7 +407,10 @@ async fn run(
                 StopReason::Length => DoneReason::Length,
                 _ => DoneReason::Stop,
             };
-            sender.push(AssistantMessageEvent::Done { reason, message: partial });
+            sender.push(AssistantMessageEvent::Done {
+                reason,
+                message: partial,
+            });
         }
     }
 }
@@ -408,8 +432,9 @@ fn update_usage(usage: &mut Usage, val: &Value) {
     if let Some(n) = val.get("completion_tokens").and_then(|v| v.as_u64()) {
         usage.output = n;
     }
-    if let Some(n) =
-        val.pointer("/prompt_tokens_details/cached_tokens").and_then(|v| v.as_u64())
+    if let Some(n) = val
+        .pointer("/prompt_tokens_details/cached_tokens")
+        .and_then(|v| v.as_u64())
     {
         usage.cache_read = n;
     }
@@ -507,7 +532,11 @@ fn convert_messages(msgs: &[Message]) -> Vec<Value> {
                     }
                 }
                 let mut msg = json!({ "role": "assistant" });
-                msg["content"] = if text.is_empty() { Value::Null } else { json!(text) };
+                msg["content"] = if text.is_empty() {
+                    Value::Null
+                } else {
+                    json!(text)
+                };
                 if !tool_calls.is_empty() {
                     msg["tool_calls"] = json!(tool_calls);
                 }
@@ -539,7 +568,9 @@ fn user_content_to_value(content: &UserContent) -> Value {
         UserContent::Text(s) => json!(s),
         UserContent::Blocks(blocks) => {
             // If there are no images, collapse to a plain string.
-            let has_image = blocks.iter().any(|b| matches!(b, UserContentBlock::Image(_)));
+            let has_image = blocks
+                .iter()
+                .any(|b| matches!(b, UserContentBlock::Image(_)));
             if !has_image {
                 let text: String = blocks
                     .iter()
@@ -587,7 +618,10 @@ fn push_error(sender: &mut AssistantMessageEventSender, model: &Model, msg: Stri
     let mut p = empty_partial(model);
     p.stop_reason = StopReason::Error;
     p.error_message = Some(msg);
-    sender.push(AssistantMessageEvent::Error { reason: ErrorReason::Error, error: p });
+    sender.push(AssistantMessageEvent::Error {
+        reason: ErrorReason::Error,
+        error: p,
+    });
 }
 
 #[cfg(test)]
@@ -614,9 +648,18 @@ mod tests {
 
     #[test]
     fn base_url_normalizes_to_v1() {
-        assert_eq!(normalize_base("https://api.openai.com"), "https://api.openai.com/v1");
-        assert_eq!(normalize_base("https://api.openai.com/v1"), "https://api.openai.com/v1");
-        assert_eq!(normalize_base("https://api.groq.com/openai/v1"), "https://api.groq.com/openai/v1");
+        assert_eq!(
+            normalize_base("https://api.openai.com"),
+            "https://api.openai.com/v1"
+        );
+        assert_eq!(
+            normalize_base("https://api.openai.com/v1"),
+            "https://api.openai.com/v1"
+        );
+        assert_eq!(
+            normalize_base("https://api.groq.com/openai/v1"),
+            "https://api.groq.com/openai/v1"
+        );
     }
 
     #[test]
@@ -706,6 +749,11 @@ mod tests {
         let arr = v.as_array().unwrap();
         assert_eq!(arr[0]["type"], "text");
         assert_eq!(arr[1]["type"], "image_url");
-        assert!(arr[1]["image_url"]["url"].as_str().unwrap().starts_with("data:image/png;base64,"));
+        assert!(
+            arr[1]["image_url"]["url"]
+                .as_str()
+                .unwrap()
+                .starts_with("data:image/png;base64,")
+        );
     }
 }

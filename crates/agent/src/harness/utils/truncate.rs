@@ -9,7 +9,11 @@ pub fn truncate_text(text: &str, max_chars: usize) -> String {
         return text.to_string();
     }
     let truncated: String = text.chars().take(max_chars).collect();
-    format!("[truncated, kept {} of {} chars]\n{truncated}", max_chars, text.chars().count())
+    format!(
+        "[truncated, kept {} of {} chars]\n{truncated}",
+        max_chars,
+        text.chars().count()
+    )
 }
 
 #[cfg(test)]

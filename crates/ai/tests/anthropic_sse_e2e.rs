@@ -76,7 +76,10 @@ event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
 
     let base = serve_once(body).await;
     let model = anthropic_model(base);
-    let opts = StreamOptions { api_key: Some("test-key".into()), ..Default::default() };
+    let opts = StreamOptions {
+        api_key: Some("test-key".into()),
+        ..Default::default()
+    };
 
     let mut s = stream(&model, &user_ctx("hi"), Some(&opts));
     let mut kinds = Vec::new();
@@ -129,7 +132,10 @@ event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
 
     let base = serve_once(body).await;
     let model = anthropic_model(base);
-    let opts = StreamOptions { api_key: Some("test-key".into()), ..Default::default() };
+    let opts = StreamOptions {
+        api_key: Some("test-key".into()),
+        ..Default::default()
+    };
 
     let mut s = stream(&model, &user_ctx("weather?"), Some(&opts));
     let mut saw_tool_start = false;
@@ -151,10 +157,14 @@ event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
 #[tokio::test]
 async fn http_error_becomes_error_event() {
     // Server returns a 200 but with an SSE `error` event.
-    let body = "event: error\ndata: {\"type\":\"error\",\"error\":{\"message\":\"overloaded\"}}\n\n";
+    let body =
+        "event: error\ndata: {\"type\":\"error\",\"error\":{\"message\":\"overloaded\"}}\n\n";
     let base = serve_once(body).await;
     let model = anthropic_model(base);
-    let opts = StreamOptions { api_key: Some("test-key".into()), ..Default::default() };
+    let opts = StreamOptions {
+        api_key: Some("test-key".into()),
+        ..Default::default()
+    };
 
     let mut s = stream(&model, &user_ctx("hi"), Some(&opts));
     let mut error_msg = None;
@@ -190,7 +200,8 @@ event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
         let _ = s.read(&mut buf).await;
         let resp = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            success_body.len(), success_body
+            success_body.len(),
+            success_body
         );
         s.write_all(resp.as_bytes()).await.unwrap();
     });
@@ -209,7 +220,9 @@ event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
         match ev {
             AssistantMessageEvent::TextDelta { delta, .. } => text.push_str(&delta),
             AssistantMessageEvent::Done { .. } => done = true,
-            AssistantMessageEvent::Error { error, .. } => panic!("unexpected error: {:?}", error.error_message),
+            AssistantMessageEvent::Error { error, .. } => {
+                panic!("unexpected error: {:?}", error.error_message)
+            }
             _ => {}
         }
     }

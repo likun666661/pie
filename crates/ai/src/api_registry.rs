@@ -50,14 +50,21 @@ struct Registry {
 
 fn registry() -> &'static Mutex<Registry> {
     static CELL: OnceLock<Mutex<Registry>> = OnceLock::new();
-    CELL.get_or_init(|| Mutex::new(Registry { entries: HashMap::new() }))
+    CELL.get_or_init(|| {
+        Mutex::new(Registry {
+            entries: HashMap::new(),
+        })
+    })
 }
 
 pub fn register_api_provider(provider: Box<dyn ApiProvider>, source_id: Option<String>) {
     let mut reg = registry().lock().expect("registry poisoned");
     reg.entries.insert(
         provider.api().to_string(),
-        RegisteredProvider { provider, source_id },
+        RegisteredProvider {
+            provider,
+            source_id,
+        },
     );
 }
 
@@ -76,7 +83,8 @@ pub fn get_api_provider(api: &Api) -> Option<RegisteredHandle> {
 
 pub fn unregister_api_providers(source_id: &str) {
     let mut reg = registry().lock().expect("registry poisoned");
-    reg.entries.retain(|_, entry| entry.source_id.as_deref() != Some(source_id));
+    reg.entries
+        .retain(|_, entry| entry.source_id.as_deref() != Some(source_id));
 }
 
 pub fn clear_api_providers() {
@@ -163,6 +171,9 @@ pub(crate) fn error_stream(message: String) -> AssistantMessageEventStream {
         error_message: Some(message),
         timestamp: chrono::Utc::now().timestamp_millis(),
     };
-    sender.push(AssistantMessageEvent::Error { reason: ErrorReason::Error, error: err });
+    sender.push(AssistantMessageEvent::Error {
+        reason: ErrorReason::Error,
+        error: err,
+    });
     stream
 }

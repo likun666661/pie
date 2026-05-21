@@ -71,8 +71,14 @@ impl AssistantMessageEventStream {
     pub fn new() -> (Self, AssistantMessageEventSender) {
         let (tx, rx) = mpsc::unbounded_channel();
         let (final_tx, final_rx) = oneshot::channel();
-        let stream = Self { rx, final_rx: Some(final_rx) };
-        let sender = AssistantMessageEventSender { tx, final_tx: Some(final_tx) };
+        let stream = Self {
+            rx,
+            final_rx: Some(final_rx),
+        };
+        let sender = AssistantMessageEventSender {
+            tx,
+            final_tx: Some(final_tx),
+        };
         (stream, sender)
     }
 
@@ -96,8 +102,8 @@ impl Stream for AssistantMessageEventStream {
 }
 
 /// Factory function. Mirrors `createAssistantMessageEventStream()` on the TS side.
-pub fn create_assistant_message_event_stream(
-) -> (AssistantMessageEventStream, AssistantMessageEventSender) {
+pub fn create_assistant_message_event_stream()
+-> (AssistantMessageEventStream, AssistantMessageEventSender) {
     AssistantMessageEventStream::new()
 }
 
@@ -128,8 +134,13 @@ mod tests {
     async fn iterates_to_done() {
         let (mut stream, mut sender) = AssistantMessageEventStream::new();
         let msg = mk_msg();
-        sender.push(AssistantMessageEvent::Start { partial: msg.clone() });
-        sender.push(AssistantMessageEvent::Done { reason: DoneReason::Stop, message: msg });
+        sender.push(AssistantMessageEvent::Start {
+            partial: msg.clone(),
+        });
+        sender.push(AssistantMessageEvent::Done {
+            reason: DoneReason::Stop,
+            message: msg,
+        });
         drop(sender);
         let mut count = 0;
         while let Some(_ev) = stream.next().await {
@@ -142,7 +153,10 @@ mod tests {
     async fn result_resolves_before_drain() {
         let (stream, mut sender) = AssistantMessageEventStream::new();
         let msg = mk_msg();
-        sender.push(AssistantMessageEvent::Done { reason: DoneReason::Stop, message: msg });
+        sender.push(AssistantMessageEvent::Done {
+            reason: DoneReason::Stop,
+            message: msg,
+        });
         drop(sender);
         let final_msg = stream.result().await;
         assert!(final_msg.is_some());

@@ -14,7 +14,7 @@ use tokio::io::AsyncReadExt;
 use tokio::time::{Duration, timeout};
 use tokio_util::sync::CancellationToken;
 
-use super::truncate::{truncate_tail, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES};
+use super::truncate::{DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, truncate_tail};
 
 pub struct BashTool;
 

@@ -20,5 +20,8 @@ pub struct ValidationResult {
 /// Validate `input` against `schema`. Currently a stub that accepts everything; the real
 /// implementation will plug in the `jsonschema` crate.
 pub fn validate(_input: &Value, _schema: &Value) -> ValidationResult {
-    ValidationResult { valid: true, errors: vec![] }
+    ValidationResult {
+        valid: true,
+        errors: vec![],
+    }
 }

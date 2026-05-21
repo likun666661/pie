@@ -114,20 +114,22 @@ async fn run(
     if !resp.status().is_success() {
         let status = resp.status();
         let txt = resp.text().await.unwrap_or_default();
-        push_error(&mut sender, &model, format!("Bedrock API error ({status}): {txt}"));
+        push_error(
+            &mut sender,
+            &model,
+            format!("Bedrock API error ({status}): {txt}"),
+        );
         return;
     }
 
     consume(resp, &model, sender).await;
 }
 
-async fn consume(
-    resp: reqwest::Response,
-    model: &Model,
-    mut sender: AssistantMessageEventSender,
-) {
+async fn consume(resp: reqwest::Response, model: &Model, mut sender: AssistantMessageEventSender) {
     let mut partial = empty_partial(model);
-    sender.push(AssistantMessageEvent::Start { partial: partial.clone() });
+    sender.push(AssistantMessageEvent::Start {
+        partial: partial.clone(),
+    });
 
     // Bedrock indexes content blocks; map contentBlockIndex → our content vec position.
     let mut tool_args: std::collections::HashMap<u64, String> = std::collections::HashMap::new();
@@ -188,8 +190,7 @@ async fn consume(
                         partial.content.push(ContentBlock::text(""));
                         p
                     });
-                    let is_first =
-                        matches!(partial.content.get(pos), Some(ContentBlock::Text(t)) if t.text.is_empty());
+                    let is_first = matches!(partial.content.get(pos), Some(ContentBlock::Text(t)) if t.text.is_empty());
                     if is_first {
                         sender.push(AssistantMessageEvent::TextStart {
                             content_index: pos,
@@ -208,7 +209,9 @@ async fn consume(
                     if let Some(text) = rc.get("text").and_then(|v| v.as_str()) {
                         let pos = *index_map.entry(bidx).or_insert_with(|| {
                             let p = partial.content.len();
-                            partial.content.push(ContentBlock::Thinking(ThinkingContent::default()));
+                            partial
+                                .content
+                                .push(ContentBlock::Thinking(ThinkingContent::default()));
                             p
                         });
                         let is_first = matches!(
@@ -230,7 +233,8 @@ async fn consume(
                             partial: partial.clone(),
                         });
                     }
-                } else if let Some(input) = delta.pointer("/toolUse/input").and_then(|v| v.as_str()) {
+                } else if let Some(input) = delta.pointer("/toolUse/input").and_then(|v| v.as_str())
+                {
                     if let Some(pos) = index_map.get(&bidx).copied() {
                         tool_args.entry(bidx).or_default().push_str(input);
                         sender.push(AssistantMessageEvent::ToolCallDelta {
@@ -302,7 +306,10 @@ async fn consume(
         StopReason::Length => DoneReason::Length,
         _ => DoneReason::Stop,
     };
-    sender.push(AssistantMessageEvent::Done { reason, message: partial });
+    sender.push(AssistantMessageEvent::Done {
+        reason,
+        message: partial,
+    });
 }
 
 fn map_stop_reason(s: &str) -> StopReason {
@@ -317,8 +324,14 @@ fn map_stop_reason(s: &str) -> StopReason {
 fn update_usage(usage: &mut Usage, u: &Value) {
     usage.input = u.get("inputTokens").and_then(|v| v.as_u64()).unwrap_or(0);
     usage.output = u.get("outputTokens").and_then(|v| v.as_u64()).unwrap_or(0);
-    usage.cache_read = u.get("cacheReadInputTokens").and_then(|v| v.as_u64()).unwrap_or(0);
-    usage.cache_write = u.get("cacheWriteInputTokens").and_then(|v| v.as_u64()).unwrap_or(0);
+    usage.cache_read = u
+        .get("cacheReadInputTokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    usage.cache_write = u
+        .get("cacheWriteInputTokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
     usage.total_tokens = usage.input + usage.output + usage.cache_read + usage.cache_write;
 }
 
@@ -340,7 +353,10 @@ fn build_request_body(context: &Context, options: &StreamOptions) -> Value {
 
 fn inference_config(options: &StreamOptions) -> Value {
     let mut cfg = serde_json::Map::new();
-    cfg.insert("maxTokens".into(), json!(options.max_tokens.unwrap_or(4096)));
+    cfg.insert(
+        "maxTokens".into(),
+        json!(options.max_tokens.unwrap_or(4096)),
+    );
     if let Some(t) = options.temperature {
         cfg.insert("temperature".into(), json!(t));
     }
@@ -444,7 +460,10 @@ fn push_error(sender: &mut AssistantMessageEventSender, model: &Model, msg: Stri
     let mut p = empty_partial(model);
     p.stop_reason = StopReason::Error;
     p.error_message = Some(msg);
-    sender.push(AssistantMessageEvent::Error { reason: ErrorReason::Error, error: p });
+    sender.push(AssistantMessageEvent::Error {
+        reason: ErrorReason::Error,
+        error: p,
+    });
 }
 
 #[cfg(test)]
@@ -466,7 +485,10 @@ mod tests {
                 parameters: json!({ "type": "object" }),
             }]),
         };
-        let opts = StreamOptions { max_tokens: Some(512), ..Default::default() };
+        let opts = StreamOptions {
+            max_tokens: Some(512),
+            ..Default::default()
+        };
         let body = build_request_body(&ctx, &opts);
         assert_eq!(body["system"][0]["text"], "sys");
         assert_eq!(body["messages"][0]["role"], "user");

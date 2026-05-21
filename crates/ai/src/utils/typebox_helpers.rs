@@ -2,7 +2,7 @@
 //! `serde_json::Value` shapes (per Q3:A — JSON Schema literals are the contract).
 //! 1:1 stub of `packages/ai/src/utils/typebox-helpers.ts`.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// JSON Schema for a required string field.
 pub fn string(description: impl Into<String>) -> Value {

@@ -3,6 +3,6 @@
 //! primary callers. Mirrors the TS module which is mostly a barrel.
 
 pub use super::compaction::{
-    estimate_context_tokens, estimate_tokens, find_cut_point, find_turn_start_index,
-    serialize_conversation, ContextUsageEstimate, CutPointResult,
+    ContextUsageEstimate, CutPointResult, estimate_context_tokens, estimate_tokens, find_cut_point,
+    find_turn_start_index, serialize_conversation,
 };

@@ -2,7 +2,7 @@
 //! frontmatter parsing, name/parent-dir matching, and the system-prompt block format.
 
 use pie_agent_core::{
-    format_skills_for_system_prompt, load_skills, NativeEnv, SkillDiagnosticCode,
+    NativeEnv, SkillDiagnosticCode, format_skills_for_system_prompt, load_skills,
 };
 use tempfile::tempdir;
 use tokio_util::sync::CancellationToken;
@@ -20,14 +20,13 @@ async fn discovers_skill_with_matching_parent_dir() {
     .unwrap();
 
     let env = NativeEnv::new(root.to_string_lossy().to_string());
-    let out = load_skills(
-        &env,
-        &[root.to_str().unwrap()],
-        CancellationToken::new(),
-    )
-    .await;
+    let out = load_skills(&env, &[root.to_str().unwrap()], CancellationToken::new()).await;
 
-    assert!(out.diagnostics.is_empty(), "unexpected diagnostics: {:?}", out.diagnostics);
+    assert!(
+        out.diagnostics.is_empty(),
+        "unexpected diagnostics: {:?}",
+        out.diagnostics
+    );
     assert_eq!(out.skills.len(), 1);
     let s = &out.skills[0];
     assert_eq!(s.name, "my-skill");
@@ -45,7 +44,10 @@ async fn missing_description_emits_diagnostic_and_skips() {
 
     let env = NativeEnv::new(root.to_string_lossy().to_string());
     let out = load_skills(&env, &[root.to_str().unwrap()], CancellationToken::new()).await;
-    assert!(out.skills.is_empty(), "skills without description should be skipped");
+    assert!(
+        out.skills.is_empty(),
+        "skills without description should be skipped"
+    );
     assert!(
         out.diagnostics
             .iter()

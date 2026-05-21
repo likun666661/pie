@@ -24,7 +24,10 @@ impl PromptTemplateRegistry {
     }
 
     /// Interpolate `{{var}}` placeholders. Missing keys leave the placeholder verbatim.
-    pub fn interpolate(template: &PromptTemplate, vars: &serde_json::Map<String, serde_json::Value>) -> String {
+    pub fn interpolate(
+        template: &PromptTemplate,
+        vars: &serde_json::Map<String, serde_json::Value>,
+    ) -> String {
         let mut out = template.content.clone();
         for (k, v) in vars {
             let needle = format!("{{{{{k}}}}}");
@@ -52,6 +55,9 @@ mod tests {
         };
         let mut vars = serde_json::Map::new();
         vars.insert("who".into(), serde_json::json!("world"));
-        assert_eq!(PromptTemplateRegistry::interpolate(&t, &vars), "hi world — {{missing}}");
+        assert_eq!(
+            PromptTemplateRegistry::interpolate(&t, &vars),
+            "hi world — {{missing}}"
+        );
     }
 }

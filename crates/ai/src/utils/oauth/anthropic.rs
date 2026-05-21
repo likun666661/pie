@@ -8,7 +8,7 @@
 use base64::Engine;
 use serde::Deserialize;
 
-use super::pkce::{generate_pkce, PkcePair};
+use super::pkce::{PkcePair, generate_pkce};
 use super::types::OAuthCredentials;
 
 const AUTHORIZE_URL: &str = "https://claude.ai/oauth/authorize";
@@ -20,7 +20,9 @@ const SCOPES: &str = "org:create_api_key user:profile user:inference user:sessio
 /// Client id, base64-obfuscated in the TS source. Decoded at runtime to match 1:1.
 fn client_id() -> String {
     let encoded = "OWQxYzI1MGEtZTYxYi00NGQ5LTg4ZWQtNTk0NGQxOTYyZjVl";
-    let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).unwrap_or_default();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .unwrap_or_default();
     String::from_utf8(bytes).unwrap_or_default()
 }
 
@@ -94,8 +96,10 @@ pub async fn exchange_authorization_code(
         let body = resp.text().await.unwrap_or_default();
         return Err(format!("token exchange failed ({status}): {body}"));
     }
-    let token: TokenResponse =
-        resp.json().await.map_err(|e| format!("invalid token response: {e}"))?;
+    let token: TokenResponse = resp
+        .json()
+        .await
+        .map_err(|e| format!("invalid token response: {e}"))?;
     Ok(to_credentials(token))
 }
 
@@ -121,8 +125,10 @@ pub async fn refresh(creds: &OAuthCredentials) -> Result<OAuthCredentials, Strin
         let body = resp.text().await.unwrap_or_default();
         return Err(format!("token refresh failed ({status}): {body}"));
     }
-    let token: TokenResponse =
-        resp.json().await.map_err(|e| format!("invalid token response: {e}"))?;
+    let token: TokenResponse = resp
+        .json()
+        .await
+        .map_err(|e| format!("invalid token response: {e}"))?;
     Ok(to_credentials(token))
 }
 
@@ -135,7 +141,10 @@ pub struct LoginCallbacks {
 /// Run the full PKCE login: build the URL, hand it to the caller, listen on the loopback
 /// callback port for the redirect, then exchange the code for tokens.
 pub async fn login(callbacks: LoginCallbacks) -> Result<OAuthCredentials, String> {
-    let PkcePair { verifier, challenge } = generate_pkce();
+    let PkcePair {
+        verifier,
+        challenge,
+    } = generate_pkce();
     let state = uuid::Uuid::new_v4().to_string();
     let url = build_authorize_url(&challenge, &state);
     (callbacks.open_url)(&url);
@@ -153,10 +162,16 @@ async fn wait_for_redirect() -> Result<(String, String), String> {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", CALLBACK_PORT))
         .await
         .map_err(|e| format!("cannot bind callback port {CALLBACK_PORT}: {e}"))?;
-    let (mut socket, _) = listener.accept().await.map_err(|e| format!("accept failed: {e}"))?;
+    let (mut socket, _) = listener
+        .accept()
+        .await
+        .map_err(|e| format!("accept failed: {e}"))?;
 
     let mut buf = vec![0u8; 8192];
-    let n = socket.read(&mut buf).await.map_err(|e| format!("read failed: {e}"))?;
+    let n = socket
+        .read(&mut buf)
+        .await
+        .map_err(|e| format!("read failed: {e}"))?;
     let request = String::from_utf8_lossy(&buf[..n]);
     // First line: "GET /callback?code=...&state=... HTTP/1.1"
     let path = request
@@ -189,7 +204,9 @@ fn parse_callback_query(path: &str) -> (Option<String>, Option<String>) {
     let mut state = None;
     for pair in query.split('&') {
         if let Some((k, v)) = pair.split_once('=') {
-            let decoded = percent_encoding::percent_decode_str(v).decode_utf8_lossy().to_string();
+            let decoded = percent_encoding::percent_decode_str(v)
+                .decode_utf8_lossy()
+                .to_string();
             match k {
                 "code" => code = Some(decoded),
                 "state" => state = Some(decoded),

@@ -34,9 +34,8 @@ pub use stream::{complete, complete_simple, stream, stream_simple};
 pub use types::*;
 pub use utils::diagnostics::AssistantMessageDiagnostic;
 pub use utils::event_stream::{
-    AssistantMessageEventSender, AssistantMessageEventStream,
-    create_assistant_message_event_stream,
+    AssistantMessageEventSender, AssistantMessageEventStream, create_assistant_message_event_stream,
 };
 pub use utils::json_parse::parse_partial_json;
 pub use utils::overflow::{ContextOverflow, is_context_overflow};
-pub use utils::validation::{validate, ValidationError, ValidationResult};
+pub use utils::validation::{ValidationError, ValidationResult, validate};

@@ -35,7 +35,9 @@ pub async fn send_with_retry(
     req: reqwest::RequestBuilder,
 ) -> Result<reqwest::Response, RetrySendError> {
     let max_retries = options.max_retries.unwrap_or(DEFAULT_MAX_RETRIES);
-    let cap_ms = options.max_retry_delay_ms.unwrap_or(DEFAULT_MAX_RETRY_DELAY_MS);
+    let cap_ms = options
+        .max_retry_delay_ms
+        .unwrap_or(DEFAULT_MAX_RETRY_DELAY_MS);
 
     let Some(template) = req.try_clone() else {
         // Streaming body — can't replay; single-shot.
@@ -47,11 +49,17 @@ pub async fn send_with_retry(
     loop {
         let attempt_req = match template.try_clone() {
             Some(r) => r,
-            None => return Err(RetrySendError::Reqwest(
-                // try_clone failed mid-loop — shouldn't happen since we proved it cloneable
-                // above, but be defensive.
-                reqwest::Client::new().get("http://_").build().err().unwrap(),
-            )),
+            None => {
+                return Err(RetrySendError::Reqwest(
+                    // try_clone failed mid-loop — shouldn't happen since we proved it cloneable
+                    // above, but be defensive.
+                    reqwest::Client::new()
+                        .get("http://_")
+                        .build()
+                        .err()
+                        .unwrap(),
+                ));
+            }
         };
         let result = attempt_req.send().await;
         match result {
@@ -137,7 +145,9 @@ mod tests {
     #[test]
     fn status_codes_categorize() {
         assert!(is_retryable_status(reqwest::StatusCode::TOO_MANY_REQUESTS));
-        assert!(is_retryable_status(reqwest::StatusCode::INTERNAL_SERVER_ERROR));
+        assert!(is_retryable_status(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR
+        ));
         assert!(is_retryable_status(reqwest::StatusCode::BAD_GATEWAY));
         assert!(!is_retryable_status(reqwest::StatusCode::BAD_REQUEST));
         assert!(!is_retryable_status(reqwest::StatusCode::UNAUTHORIZED));

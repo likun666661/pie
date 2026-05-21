@@ -204,7 +204,11 @@ pub struct JsonlSessionMetadata {
     pub base: SessionMetadata,
     pub cwd: String,
     pub path: String,
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "parentSessionPath")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "parentSessionPath"
+    )]
     pub parent_session_path: Option<String>,
 }
 
@@ -225,10 +229,7 @@ pub trait SessionStorage: Send + Sync {
         &self,
         leaf_id: Option<&str>,
     ) -> Result<Vec<SessionTreeEntry>, SessionError>;
-    async fn find_entries(
-        &self,
-        entry_type: &str,
-    ) -> Result<Vec<SessionTreeEntry>, SessionError>;
+    async fn find_entries(&self, entry_type: &str) -> Result<Vec<SessionTreeEntry>, SessionError>;
     async fn get_label(&self, id: &str) -> Result<Option<String>, SessionError>;
 }
 
@@ -243,10 +244,14 @@ pub fn build_session_context(path_entries: &[SessionTreeEntry]) -> SessionContex
 
     for (i, entry) in path_entries.iter().enumerate() {
         match entry {
-            SessionTreeEntry::ThinkingLevelChange { thinking_level: t, .. } => {
+            SessionTreeEntry::ThinkingLevelChange {
+                thinking_level: t, ..
+            } => {
                 thinking_level = t.clone();
             }
-            SessionTreeEntry::ModelChange { provider, model_id, .. } => {
+            SessionTreeEntry::ModelChange {
+                provider, model_id, ..
+            } => {
                 model = Some(SessionContextModel {
                     provider: provider.clone(),
                     model_id: model_id.clone(),
@@ -293,7 +298,11 @@ pub fn build_session_context(path_entries: &[SessionTreeEntry]) -> SessionContex
     };
 
     if let Some(idx) = compaction_idx {
-        let SessionTreeEntry::Compaction { summary, first_kept_entry_id, .. } = &path_entries[idx]
+        let SessionTreeEntry::Compaction {
+            summary,
+            first_kept_entry_id,
+            ..
+        } = &path_entries[idx]
         else {
             unreachable!()
         };
@@ -319,7 +328,11 @@ pub fn build_session_context(path_entries: &[SessionTreeEntry]) -> SessionContex
         }
     }
 
-    SessionContext { messages, thinking_level, model }
+    SessionContext {
+        messages,
+        thinking_level,
+        model,
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────────────────
@@ -341,7 +354,10 @@ impl Session {
     }
 
     fn not_found(msg: impl Into<String>) -> SessionError {
-        SessionError { code: SessionErrorCode::NotFound, message: msg.into() }
+        SessionError {
+            code: SessionErrorCode::NotFound,
+            message: msg.into(),
+        }
     }
 
     fn now_rfc3339() -> String {
@@ -383,7 +399,10 @@ impl Session {
     pub async fn session_name(&self) -> Result<Option<String>, SessionError> {
         let entries = self.storage.find_entries("session_info").await?;
         for entry in entries.into_iter().rev() {
-            if let SessionTreeEntry::SessionInfo { name: Some(name), .. } = entry {
+            if let SessionTreeEntry::SessionInfo {
+                name: Some(name), ..
+            } = entry
+            {
                 let trimmed = name.trim();
                 if !trimmed.is_empty() {
                     return Ok(Some(trimmed.to_string()));

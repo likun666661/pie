@@ -206,14 +206,22 @@ pub enum TextSignaturePhase {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct TextContent {
     pub text: String,
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "textSignature")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "textSignature"
+    )]
     pub text_signature: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ThinkingContent {
     pub thinking: String,
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "thinkingSignature")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "thinkingSignature"
+    )]
     pub thinking_signature: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub redacted: bool,
@@ -235,7 +243,11 @@ pub struct ToolCall {
     #[serde(default)]
     pub arguments: serde_json::Map<String, serde_json::Value>,
     /// Google-specific opaque signature for reusing thought context.
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "thoughtSignature")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "thoughtSignature"
+    )]
     pub thought_signature: Option<String>,
 }
 
@@ -255,7 +267,10 @@ pub enum ContentBlock {
 
 impl ContentBlock {
     pub fn text(text: impl Into<String>) -> Self {
-        Self::Text(TextContent { text: text.into(), text_signature: None })
+        Self::Text(TextContent {
+            text: text.into(),
+            text_signature: None,
+        })
     }
 }
 
@@ -271,7 +286,10 @@ pub enum UserContentBlock {
 
 impl UserContentBlock {
     pub fn text(text: impl Into<String>) -> Self {
-        Self::Text(TextContent { text: text.into(), text_signature: None })
+        Self::Text(TextContent {
+            text: text.into(),
+            text_signature: None,
+        })
     }
 }
 
@@ -352,16 +370,28 @@ pub struct AssistantMessage {
     pub api: Api,
     pub provider: Provider,
     pub model: String,
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "responseModel")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "responseModel"
+    )]
     pub response_model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "responseId")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "responseId"
+    )]
     pub response_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostics: Option<Vec<serde_json::Value>>,
     pub usage: Usage,
     #[serde(rename = "stopReason")]
     pub stop_reason: StopReason,
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "errorMessage")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "errorMessage"
+    )]
     pub error_message: Option<String>,
     pub timestamp: i64,
 }
@@ -507,7 +537,10 @@ pub enum ErrorReason {
 
 impl AssistantMessageEvent {
     pub fn is_terminal(&self) -> bool {
-        matches!(self, AssistantMessageEvent::Done { .. } | AssistantMessageEvent::Error { .. })
+        matches!(
+            self,
+            AssistantMessageEvent::Done { .. } | AssistantMessageEvent::Error { .. }
+        )
     }
 }
 
@@ -545,7 +578,11 @@ pub struct Model {
     #[serde(rename = "baseUrl")]
     pub base_url: String,
     pub reasoning: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "thinkingLevelMap")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "thinkingLevelMap"
+    )]
     pub thinking_level_map: Option<ThinkingLevelMap>,
     #[serde(default)]
     pub input: Vec<InputModality>,
@@ -596,13 +633,21 @@ pub struct AssistantImages {
     pub provider: ImagesProvider,
     pub model: String,
     pub output: Vec<UserContentBlock>,
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "responseId")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "responseId"
+    )]
     pub response_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
     #[serde(rename = "stopReason")]
     pub stop_reason: ImagesStopReason,
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "errorMessage")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "errorMessage"
+    )]
     pub error_message: Option<String>,
     pub timestamp: i64,
 }

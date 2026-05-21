@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use pie_agent_core::{Agent, AgentEvent, AgentMessage, AgentOptions, AgentState, AgentTool};
 use pie_ai::{
-    AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream, AssistantRole, Context,
+    AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream, AssistantRole,
     ContentBlock, DoneReason, ModelCost, StopReason, ToolCall, Usage,
 };
 use tokio::sync::Mutex;
@@ -62,13 +62,18 @@ fn faux_stream_fn_with(responses: Arc<Mutex<Vec<AssistantMessage>>>) -> pie_agen
                     g.remove(0)
                 }
             };
-            sender.push(AssistantMessageEvent::Start { partial: msg.clone() });
+            sender.push(AssistantMessageEvent::Start {
+                partial: msg.clone(),
+            });
             let reason = match msg.stop_reason {
                 StopReason::ToolUse => DoneReason::ToolUse,
                 StopReason::Length => DoneReason::Length,
                 _ => DoneReason::Stop,
             };
-            sender.push(AssistantMessageEvent::Done { reason, message: msg });
+            sender.push(AssistantMessageEvent::Done {
+                reason,
+                message: msg,
+            });
         });
         stream
     })
@@ -236,8 +241,12 @@ async fn before_tool_call_can_veto_execution() {
     }
     #[async_trait::async_trait]
     impl pie_agent_core::AgentTool for EchoTool {
-        fn definition(&self) -> &pie_ai::Tool { &self.def }
-        fn label(&self) -> &str { "echo" }
+        fn definition(&self) -> &pie_ai::Tool {
+            &self.def
+        }
+        fn label(&self) -> &str {
+            "echo"
+        }
         async fn execute(
             &self,
             _id: &str,
@@ -260,13 +269,15 @@ async fn before_tool_call_can_veto_execution() {
         called: called.clone(),
     });
 
-    let veto_hook: pie_agent_core::BeforeToolCallHook = Arc::new(
-        |_ctx: BeforeToolCallContext, _cancel: CancellationToken| {
+    let veto_hook: pie_agent_core::BeforeToolCallHook =
+        Arc::new(|_ctx: BeforeToolCallContext, _cancel: CancellationToken| {
             Box::pin(async move {
-                BeforeToolCallResult { block: true, reason: Some("policy: no echo".into()) }
+                BeforeToolCallResult {
+                    block: true,
+                    reason: Some("policy: no echo".into()),
+                }
             })
-        },
-    );
+        });
 
     let mut state = pie_agent_core::AgentState::default();
     state.model = Some(faux_model());
@@ -286,13 +297,20 @@ async fn before_tool_call_can_veto_execution() {
     }));
     agent.prompt(user).await.unwrap();
 
-    assert!(!called.load(std::sync::atomic::Ordering::SeqCst), "tool must not run when hook blocks");
+    assert!(
+        !called.load(std::sync::atomic::Ordering::SeqCst),
+        "tool must not run when hook blocks"
+    );
     let g = agent.state();
     // The synthesized tool result should be is_error=true with the hook reason.
-    let synth = g.messages.iter().find_map(|m| match m {
-        AgentMessage::Llm(pie_ai::Message::ToolResult(tr)) => Some(tr),
-        _ => None,
-    }).expect("synth tool result");
+    let synth = g
+        .messages
+        .iter()
+        .find_map(|m| match m {
+            AgentMessage::Llm(pie_ai::Message::ToolResult(tr)) => Some(tr),
+            _ => None,
+        })
+        .expect("synth tool result");
     assert!(synth.is_error);
     let text = match &synth.content[0] {
         pie_ai::UserContentBlock::Text(t) => t.text.clone(),
@@ -329,11 +347,17 @@ async fn parallel_tools_execute_concurrently() {
     ]));
 
     // Sleep 200ms per call — under parallel, total ≈200ms; sequential would be ≈400ms.
-    struct SlowTool { def: pie_ai::Tool }
+    struct SlowTool {
+        def: pie_ai::Tool,
+    }
     #[async_trait::async_trait]
     impl pie_agent_core::AgentTool for SlowTool {
-        fn definition(&self) -> &pie_ai::Tool { &self.def }
-        fn label(&self) -> &str { "slow" }
+        fn definition(&self) -> &pie_ai::Tool {
+            &self.def
+        }
+        fn label(&self) -> &str {
+            "slow"
+        }
         async fn execute(
             &self,
             _id: &str,
@@ -345,11 +369,13 @@ async fn parallel_tools_execute_concurrently() {
             Ok(pie_agent_core::AgentToolResult::default())
         }
     }
-    let tool = Arc::new(SlowTool { def: pie_ai::Tool {
-        name: "slow".into(),
-        description: "sleep".into(),
-        parameters: serde_json::json!({ "type": "object" }),
-    } });
+    let tool = Arc::new(SlowTool {
+        def: pie_ai::Tool {
+            name: "slow".into(),
+            description: "sleep".into(),
+            parameters: serde_json::json!({ "type": "object" }),
+        },
+    });
 
     let mut state = pie_agent_core::AgentState::default();
     state.model = Some(faux_model());
@@ -371,6 +397,9 @@ async fn parallel_tools_execute_concurrently() {
     agent.prompt(user).await.unwrap();
     let elapsed = start.elapsed();
     // Parallel should finish in well under 400ms; allow 350ms for scheduler slack.
-    assert!(elapsed < std::time::Duration::from_millis(350),
-        "expected parallel tool exec, took {:?}", elapsed);
+    assert!(
+        elapsed < std::time::Duration::from_millis(350),
+        "expected parallel tool exec, took {:?}",
+        elapsed
+    );
 }

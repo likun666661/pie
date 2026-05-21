@@ -62,7 +62,9 @@ pub async fn load_skills(
                 continue;
             }
         };
-        if resolve_kind(env, &info, &mut out.diagnostics, &cancel).await != Some(FileKind::Directory) {
+        if resolve_kind(env, &info, &mut out.diagnostics, &cancel).await
+            != Some(FileKind::Directory)
+        {
             continue;
         }
         let root_path = info.path.clone();
@@ -70,7 +72,9 @@ pub async fn load_skills(
             env,
             root: root_path.clone(),
             cancel: cancel.clone(),
-            ignore: GitignoreBuilder::new(&root_path).build().unwrap_or_else(|_| Gitignore::empty()),
+            ignore: GitignoreBuilder::new(&root_path)
+                .build()
+                .unwrap_or_else(|_| Gitignore::empty()),
         };
         walker.walk(root_path, &mut out).await;
     }
@@ -113,7 +117,8 @@ impl<'a> Walker<'a> {
     async fn walk(&mut self, root: String, out: &mut LoadSkillsOutput) {
         let mut stack: Vec<(String, bool)> = vec![(root, true)];
         while let Some((dir, include_root_files)) = stack.pop() {
-            self.walk_one(&dir, include_root_files, &mut stack, out).await;
+            self.walk_one(&dir, include_root_files, &mut stack, out)
+                .await;
         }
     }
 
@@ -183,7 +188,11 @@ impl<'a> Walker<'a> {
 
     async fn add_ignore_rules(&mut self, dir: &str, out: &mut LoadSkillsOutput) {
         let rel = relative_env_path(&self.root, dir);
-        let prefix = if rel.is_empty() { String::new() } else { format!("{rel}/") };
+        let prefix = if rel.is_empty() {
+            String::new()
+        } else {
+            format!("{rel}/")
+        };
 
         for filename in IGNORE_FILE_NAMES {
             let path = join_env_path(dir, filename);
@@ -230,12 +239,20 @@ impl<'a> Walker<'a> {
         if rel.is_empty() {
             return false;
         }
-        let probe = if is_dir { format!("{rel}/") } else { rel.to_string() };
+        let probe = if is_dir {
+            format!("{rel}/")
+        } else {
+            rel.to_string()
+        };
         self.ignore.matched(&probe, is_dir).is_ignore()
     }
 
     async fn load_skill_from_file(&self, file_path: &str, out: &mut LoadSkillsOutput) {
-        let raw = match self.env.read_text_file(file_path, self.cancel.clone()).await {
+        let raw = match self
+            .env
+            .read_text_file(file_path, self.cancel.clone())
+            .await
+        {
             Ok(c) => c,
             Err(e) => {
                 out.diagnostics.push(SkillDiagnostic {
@@ -299,15 +316,11 @@ fn merge_ignores(base: &Gitignore, extra: Gitignore, root: &str) -> Gitignore {
     if extra.num_ignores() == 0 {
         base.clone()
     } else {
-        let mut b = GitignoreBuilder::new(root);
         // We can't enumerate the underlying patterns out of `Gitignore`, so we live with the
         // limitation: the most recent rules win, earlier rules from outer dirs are dropped if a
         // nested dir adds its own ignore file. TS keeps all rules. TODO: track patterns in a
         // parallel Vec<String> if/when this matters.
-        for _ in 0..0 {
-            // placeholder so the closure types resolve
-        }
-        let _ = &mut b;
+        let _ = GitignoreBuilder::new(root); // intentionally unused; keeps the API call shape
         extra
     }
 }
@@ -338,12 +351,20 @@ fn parse_frontmatter(content: &str) -> std::result::Result<(SkillFrontmatter, St
 fn validate_name(name: &str, parent_dir_name: &str) -> Vec<String> {
     let mut errors = Vec::new();
     if name != parent_dir_name {
-        errors.push(format!("name \"{name}\" does not match parent directory \"{parent_dir_name}\""));
+        errors.push(format!(
+            "name \"{name}\" does not match parent directory \"{parent_dir_name}\""
+        ));
     }
     if name.chars().count() > MAX_NAME_LENGTH {
-        errors.push(format!("name exceeds {MAX_NAME_LENGTH} characters ({})", name.chars().count()));
+        errors.push(format!(
+            "name exceeds {MAX_NAME_LENGTH} characters ({})",
+            name.chars().count()
+        ));
     }
-    if !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
         errors.push(
             "name contains invalid characters (must be lowercase a-z, 0-9, hyphens only)".into(),
         );
@@ -426,8 +447,16 @@ fn prefix_ignore_pattern(line: &str, prefix: &str) -> Option<String> {
     if let Some(rest) = pattern.strip_prefix('/') {
         pattern = rest.to_string();
     }
-    let prefixed = if prefix.is_empty() { pattern } else { format!("{prefix}{pattern}") };
-    Some(if negated { format!("!{prefixed}") } else { prefixed })
+    let prefixed = if prefix.is_empty() {
+        pattern
+    } else {
+        format!("{prefix}{pattern}")
+    };
+    Some(if negated {
+        format!("!{prefixed}")
+    } else {
+        prefixed
+    })
 }
 
 async fn resolve_kind(

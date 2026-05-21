@@ -146,7 +146,11 @@ pub struct AgentToolResult {
 
 impl Default for AgentToolResult {
     fn default() -> Self {
-        Self { content: Vec::new(), details: serde_json::Value::Null, terminate: None }
+        Self {
+            content: Vec::new(),
+            details: serde_json::Value::Null,
+            terminate: None,
+        }
     }
 }
 
@@ -372,7 +376,7 @@ pub type StreamFn = Arc<
 
 /// Build the default `StreamFn` — delegates to `pie_ai::stream_simple`.
 pub fn default_stream_fn() -> StreamFn {
-    Arc::new(|model, context, options| pie_ai::stream_simple(model, context, options))
+    Arc::new(pie_ai::stream_simple)
 }
 
 /// Sync convertToLlm callback shape. Implementations must not panic; return a safe fallback
@@ -390,8 +394,7 @@ pub type TransformContext = Arc<
 >;
 
 /// Resolves an API key dynamically per LLM call. Useful for short-lived OAuth tokens.
-pub type GetApiKey =
-    Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+pub type GetApiKey = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
 /// Configuration for one run of [`crate::agent_loop::run_agent_loop`]. Matches `AgentLoopConfig`
 /// in TS field-for-field, with Rust closure types for the callbacks.
@@ -440,9 +443,7 @@ pub type AfterToolCallHook = Arc<
 >;
 
 pub type ShouldStopHook = Arc<
-    dyn Fn(
-            ShouldStopAfterTurnContext,
-        ) -> Pin<Box<dyn std::future::Future<Output = bool> + Send>>
+    dyn Fn(ShouldStopAfterTurnContext) -> Pin<Box<dyn std::future::Future<Output = bool> + Send>>
         + Send
         + Sync,
 >;
@@ -450,15 +451,14 @@ pub type ShouldStopHook = Arc<
 pub type PrepareNextTurnHook = Arc<
     dyn Fn(
             PrepareNextTurnContext,
-        ) -> Pin<Box<dyn std::future::Future<Output = Option<AgentLoopTurnUpdate>> + Send>>
+        )
+            -> Pin<Box<dyn std::future::Future<Output = Option<AgentLoopTurnUpdate>> + Send>>
         + Send
         + Sync,
 >;
 
 pub type MessageQueueProvider = Arc<
-    dyn Fn() -> Pin<Box<dyn std::future::Future<Output = Vec<AgentMessage>> + Send>>
-        + Send
-        + Sync,
+    dyn Fn() -> Pin<Box<dyn std::future::Future<Output = Vec<AgentMessage>> + Send>> + Send + Sync,
 >;
 
 /// Default convert-to-llm: keep only `AgentMessage::Llm` variants.

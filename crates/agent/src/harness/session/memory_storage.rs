@@ -34,7 +34,10 @@ impl MemorySessionStorage {
     }
 
     pub fn with_metadata(metadata: SessionMetadata) -> Self {
-        Self { metadata, inner: Mutex::new(Inner::default()) }
+        Self {
+            metadata,
+            inner: Mutex::new(Inner::default()),
+        }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
@@ -113,10 +116,7 @@ impl SessionStorage for MemorySessionStorage {
         Ok(chain)
     }
 
-    async fn find_entries(
-        &self,
-        entry_type: &str,
-    ) -> Result<Vec<SessionTreeEntry>, SessionError> {
+    async fn find_entries(&self, entry_type: &str) -> Result<Vec<SessionTreeEntry>, SessionError> {
         Ok(self
             .lock()
             .entries
@@ -130,7 +130,10 @@ impl SessionStorage for MemorySessionStorage {
         // Walk Label entries in append order; latest non-None pointing at `id` wins.
         let mut latest: Option<String> = None;
         for entry in self.lock().entries.iter() {
-            if let SessionTreeEntry::Label { target_id, label, .. } = entry {
+            if let SessionTreeEntry::Label {
+                target_id, label, ..
+            } = entry
+            {
                 if target_id == id {
                     latest = label.clone();
                 }

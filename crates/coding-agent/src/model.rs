@@ -19,7 +19,10 @@ const CANDIDATES: &[(&str, &str, &str)] = &[
 /// Returns the resolved model + provider id of the chosen entry. If the catalog doesn't
 /// contain the default model id, returns an error so the caller can ask the user to specify
 /// a model explicitly.
-pub fn auto_detect_model(override_provider: Option<&str>, override_model: Option<&str>) -> Result<Model> {
+pub fn auto_detect_model(
+    override_provider: Option<&str>,
+    override_model: Option<&str>,
+) -> Result<Model> {
     // Explicit overrides win.
     if let (Some(p), Some(id)) = (override_provider, override_model) {
         let provider = Provider::from(p);
@@ -46,7 +49,11 @@ pub fn auto_detect_model(override_provider: Option<&str>, override_model: Option
     }
     bail!(
         "no API key found. Set one of: {}",
-        CANDIDATES.iter().map(|c| c.0).collect::<Vec<_>>().join(", ")
+        CANDIDATES
+            .iter()
+            .map(|c| c.0)
+            .collect::<Vec<_>>()
+            .join(", ")
     );
 }
 

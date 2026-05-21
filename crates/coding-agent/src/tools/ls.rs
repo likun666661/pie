@@ -47,8 +47,10 @@ impl AgentTool for LsTool {
             .await
             .map_err(|e| AgentToolError::from(format!("ls {path}: {e}")))?;
         let mut entries: Vec<(String, bool, u64)> = Vec::new();
-        while let Some(entry) =
-            rd.next_entry().await.map_err(|e| AgentToolError::from(format!("ls: {e}")))?
+        while let Some(entry) = rd
+            .next_entry()
+            .await
+            .map_err(|e| AgentToolError::from(format!("ls: {e}")))?
         {
             let name = entry.file_name().to_string_lossy().into_owned();
             let meta = entry

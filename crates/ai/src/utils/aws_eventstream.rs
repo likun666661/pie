@@ -31,7 +31,11 @@ pub struct AwsEventStream<S> {
 
 impl<S> AwsEventStream<S> {
     pub fn new(inner: S) -> Self {
-        Self { inner, buf: BytesMut::new(), upstream_done: false }
+        Self {
+            inner,
+            buf: BytesMut::new(),
+            upstream_done: false,
+        }
     }
 
     /// Try to decode one complete frame from the front of the buffer.
@@ -39,7 +43,8 @@ impl<S> AwsEventStream<S> {
         if self.buf.len() < 12 {
             return None;
         }
-        let total_len = u32::from_be_bytes([self.buf[0], self.buf[1], self.buf[2], self.buf[3]]) as usize;
+        let total_len =
+            u32::from_be_bytes([self.buf[0], self.buf[1], self.buf[2], self.buf[3]]) as usize;
         if total_len < 16 || self.buf.len() < total_len {
             return None;
         }
@@ -83,15 +88,29 @@ fn decode_headers(mut h: &[u8], msg: &mut EventStreamMessage) {
                 if cursor + vlen > h.len() {
                     return;
                 }
-                let v = std::str::from_utf8(&h[cursor..cursor + vlen]).unwrap_or("").to_string();
+                let v = std::str::from_utf8(&h[cursor..cursor + vlen])
+                    .unwrap_or("")
+                    .to_string();
                 cursor += vlen;
                 Some(v)
             }
-            0 | 1 => None,            // bool true/false, no value bytes
-            2 => { cursor += 1; None } // byte
-            3 => { cursor += 2; None } // short
-            4 => { cursor += 4; None } // int
-            5 => { cursor += 8; None } // long
+            0 | 1 => None, // bool true/false, no value bytes
+            2 => {
+                cursor += 1;
+                None
+            } // byte
+            3 => {
+                cursor += 2;
+                None
+            } // short
+            4 => {
+                cursor += 4;
+                None
+            } // int
+            5 => {
+                cursor += 8;
+                None
+            } // long
             6 => {
                 // byte buffer: [len u16][bytes]
                 if cursor + 2 > h.len() {
@@ -101,8 +120,14 @@ fn decode_headers(mut h: &[u8], msg: &mut EventStreamMessage) {
                 cursor += 2 + vlen;
                 None
             }
-            8 => { cursor += 8; None }  // timestamp
-            9 => { cursor += 16; None } // uuid
+            8 => {
+                cursor += 8;
+                None
+            } // timestamp
+            9 => {
+                cursor += 16;
+                None
+            } // uuid
             _ => return,
         };
         match name {

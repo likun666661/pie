@@ -11,11 +11,16 @@ use crate::types::*;
 
 /// A Gemini "thought" part carries `thought: true`.
 pub fn is_thinking_part(part: &Value) -> bool {
-    part.get("thought").and_then(|v| v.as_bool()).unwrap_or(false)
+    part.get("thought")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
 }
 
 /// Keep a non-empty incoming signature, else retain the existing one. Never merges.
-pub fn retain_thought_signature(existing: Option<String>, incoming: Option<&str>) -> Option<String> {
+pub fn retain_thought_signature(
+    existing: Option<String>,
+    incoming: Option<&str>,
+) -> Option<String> {
     match incoming {
         Some(s) if !s.is_empty() => Some(s.to_string()),
         _ => existing,
@@ -101,9 +106,9 @@ pub fn convert_messages(msgs: &[Message]) -> Vec<Value> {
                 // Gemini groups consecutive functionResponses into one user content.
                 if let Some(last) = out.last_mut() {
                     if last["role"] == "user"
-                        && last["parts"].as_array().is_some_and(|p| {
-                            p.iter().any(|x| x.get("functionResponse").is_some())
-                        })
+                        && last["parts"]
+                            .as_array()
+                            .is_some_and(|p| p.iter().any(|x| x.get("functionResponse").is_some()))
                     {
                         last["parts"].as_array_mut().unwrap().push(part);
                         continue;

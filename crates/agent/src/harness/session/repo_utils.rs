@@ -51,11 +51,11 @@ pub async fn get_entries_to_fork(
     let effective_leaf: Option<String> = match options.position {
         ForkPosition::At => Some(target.id().to_string()),
         ForkPosition::Before => match &target {
-            SessionTreeEntry::Message { message: AgentMessage::Llm(m), parent_id, .. }
-                if matches!(m, pie_ai::Message::User(_)) =>
-            {
-                parent_id.clone()
-            }
+            SessionTreeEntry::Message {
+                message: AgentMessage::Llm(m),
+                parent_id,
+                ..
+            } if matches!(m, pie_ai::Message::User(_)) => parent_id.clone(),
             _ => {
                 return Err(SessionError {
                     code: SessionErrorCode::NotFound,

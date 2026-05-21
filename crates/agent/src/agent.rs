@@ -76,7 +76,10 @@ pub(crate) struct PendingMessageQueue {
 
 impl PendingMessageQueue {
     fn new(mode: QueueMode) -> Self {
-        Self { mode, items: Vec::new() }
+        Self {
+            mode,
+            items: Vec::new(),
+        }
     }
 
     pub fn enqueue(&mut self, m: AgentMessage) {
@@ -96,6 +99,7 @@ impl PendingMessageQueue {
         }
     }
 
+    #[allow(dead_code)] // public API for future schedulers; not used by the current loop.
     pub fn has_items(&self) -> bool {
         !self.items.is_empty()
     }
@@ -116,7 +120,9 @@ impl Agent {
             active_cancel: Mutex::new(None),
             idle: Notify::new(),
         };
-        Self { inner: Arc::new(inner) }
+        Self {
+            inner: Arc::new(inner),
+        }
     }
 
     /// Subscribe to lifecycle events. Returns an unsubscribe closure.
@@ -188,7 +194,9 @@ impl Agent {
 /// Errors that can short-circuit `prompt` / `continue_`.
 #[derive(Debug, thiserror::Error)]
 pub enum AgentRunError {
-    #[error("Agent is already processing a prompt. Use enqueue_steering/enqueue_follow_up or wait for completion.")]
+    #[error(
+        "Agent is already processing a prompt. Use enqueue_steering/enqueue_follow_up or wait for completion."
+    )]
     AlreadyStreaming,
     #[error("{0}")]
     Other(String),
@@ -202,4 +210,3 @@ impl AgentInner {
             .expect("convert_to_llm is always set in Agent::new")(msgs)
     }
 }
-

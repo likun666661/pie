@@ -68,7 +68,13 @@ fn file_info_from_meta(name: String, path: String, m: std::fs::Metadata) -> File
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
-    FileInfo { name, path, kind, size: m.len(), mtime_ms }
+    FileInfo {
+        name,
+        path,
+        kind,
+        size: m.len(),
+        mtime_ms,
+    }
 }
 
 #[async_trait]
@@ -91,7 +97,9 @@ impl ExecutionEnv for NativeEnv {
 
     async fn read_text_file(&self, path: &str, _cancel: CancellationToken) -> FsResult<String> {
         let p = self.resolve(path);
-        fs::read_to_string(&p).await.map_err(|e| map_io_error(e, Some(path)))
+        fs::read_to_string(&p)
+            .await
+            .map_err(|e| map_io_error(e, Some(path)))
     }
 
     async fn read_text_lines(
@@ -101,7 +109,9 @@ impl ExecutionEnv for NativeEnv {
         _cancel: CancellationToken,
     ) -> FsResult<Vec<String>> {
         let p = self.resolve(path);
-        let file = fs::File::open(&p).await.map_err(|e| map_io_error(e, Some(path)))?;
+        let file = fs::File::open(&p)
+            .await
+            .map_err(|e| map_io_error(e, Some(path)))?;
         let mut reader = tokio::io::BufReader::new(file).lines();
         let mut out = Vec::new();
         let cap = max_lines.unwrap_or(usize::MAX);
@@ -130,7 +140,9 @@ impl ExecutionEnv for NativeEnv {
         if let Some(parent) = p.parent() {
             let _ = fs::create_dir_all(parent).await;
         }
-        fs::write(&p, content).await.map_err(|e| map_io_error(e, Some(path)))
+        fs::write(&p, content)
+            .await
+            .map_err(|e| map_io_error(e, Some(path)))
     }
 
     async fn append_file(
@@ -150,21 +162,38 @@ impl ExecutionEnv for NativeEnv {
             .open(&p)
             .await
             .map_err(|e| map_io_error(e, Some(path)))?;
-        f.write_all(content).await.map_err(|e| map_io_error(e, Some(path)))
+        f.write_all(content)
+            .await
+            .map_err(|e| map_io_error(e, Some(path)))
     }
 
     async fn file_info(&self, path: &str, _cancel: CancellationToken) -> FsResult<FileInfo> {
         let p = self.resolve(path);
-        let m = fs::symlink_metadata(&p).await.map_err(|e| map_io_error(e, Some(path)))?;
-        let name = p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-        Ok(file_info_from_meta(name, p.to_string_lossy().to_string(), m))
+        let m = fs::symlink_metadata(&p)
+            .await
+            .map_err(|e| map_io_error(e, Some(path)))?;
+        let name = p
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        Ok(file_info_from_meta(
+            name,
+            p.to_string_lossy().to_string(),
+            m,
+        ))
     }
 
     async fn list_dir(&self, path: &str, _cancel: CancellationToken) -> FsResult<Vec<FileInfo>> {
         let p = self.resolve(path);
-        let mut rd = fs::read_dir(&p).await.map_err(|e| map_io_error(e, Some(path)))?;
+        let mut rd = fs::read_dir(&p)
+            .await
+            .map_err(|e| map_io_error(e, Some(path)))?;
         let mut out = Vec::new();
-        while let Some(entry) = rd.next_entry().await.map_err(|e| map_io_error(e, Some(path)))? {
+        while let Some(entry) = rd
+            .next_entry()
+            .await
+            .map_err(|e| map_io_error(e, Some(path)))?
+        {
             let m = entry
                 .metadata()
                 .await
@@ -187,7 +216,9 @@ impl ExecutionEnv for NativeEnv {
 
     async fn canonical_path(&self, path: &str, _cancel: CancellationToken) -> FsResult<String> {
         let p = self.resolve(path);
-        let resolved = fs::canonicalize(&p).await.map_err(|e| map_io_error(e, Some(path)))?;
+        let resolved = fs::canonicalize(&p)
+            .await
+            .map_err(|e| map_io_error(e, Some(path)))?;
         Ok(resolved.to_string_lossy().to_string())
     }
 
@@ -198,7 +229,11 @@ impl ExecutionEnv for NativeEnv {
         _cancel: CancellationToken,
     ) -> FsResult<()> {
         let p = self.resolve(path);
-        let res = if recursive { fs::create_dir_all(&p).await } else { fs::create_dir(&p).await };
+        let res = if recursive {
+            fs::create_dir_all(&p).await
+        } else {
+            fs::create_dir(&p).await
+        };
         res.map_err(|e| map_io_error(e, Some(path)))
     }
 
@@ -232,9 +267,14 @@ impl ExecutionEnv for NativeEnv {
         prefix: Option<&str>,
         _cancel: CancellationToken,
     ) -> FsResult<String> {
-        let p = std::env::temp_dir()
-            .join(format!("{}-{}", prefix.unwrap_or("tmp-"), uuid::Uuid::new_v4().simple()));
-        fs::create_dir_all(&p).await.map_err(|e| map_io_error(e, None))?;
+        let p = std::env::temp_dir().join(format!(
+            "{}-{}",
+            prefix.unwrap_or("tmp-"),
+            uuid::Uuid::new_v4().simple()
+        ));
+        fs::create_dir_all(&p)
+            .await
+            .map_err(|e| map_io_error(e, None))?;
         Ok(p.to_string_lossy().to_string())
     }
 
@@ -251,7 +291,9 @@ impl ExecutionEnv for NativeEnv {
             suffix.unwrap_or("")
         );
         let p = std::env::temp_dir().join(name);
-        fs::write(&p, b"").await.map_err(|e| map_io_error(e, None))?;
+        fs::write(&p, b"")
+            .await
+            .map_err(|e| map_io_error(e, None))?;
         Ok(p.to_string_lossy().to_string())
     }
 

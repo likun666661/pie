@@ -12,28 +12,28 @@ use crate::types::{AssistantMessage, StopReason};
 /// Compiled overflow patterns. The TS list is reproduced verbatim (case-insensitive).
 static OVERFLOW_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
     [
-        r"prompt is too long",                                                   // Anthropic token overflow
-        r"request_too_large",                                                    // Anthropic 413 byte-size
-        r"input is too long for requested model",                                // Amazon Bedrock
-        r"exceeds the context window",                                           // OpenAI (Completions & Responses)
+        r"prompt is too long",                    // Anthropic token overflow
+        r"request_too_large",                     // Anthropic 413 byte-size
+        r"input is too long for requested model", // Amazon Bedrock
+        r"exceeds the context window",            // OpenAI (Completions & Responses)
         r"exceeds (?:the )?(?:model'?s )?maximum context length of [\d,]+ tokens?", // LiteLLM proxies
-        r"input token count.*exceeds the maximum",                               // Google (Gemini)
-        r"maximum prompt length is \d+",                                         // xAI (Grok)
-        r"reduce the length of the messages",                                    // Groq
-        r"maximum context length is \d+ tokens",                                 // OpenRouter
+        r"input token count.*exceeds the maximum", // Google (Gemini)
+        r"maximum prompt length is \d+",           // xAI (Grok)
+        r"reduce the length of the messages",      // Groq
+        r"maximum context length is \d+ tokens",   // OpenRouter
         r"input \(\d+ tokens\) is longer than the model'?s context length \(\d+ tokens\)", // Together AI
-        r"exceeds the limit of \d+",                                             // GitHub Copilot
-        r"exceeds the available context size",                                   // llama.cpp
-        r"greater than the context length",                                      // LM Studio
-        r"context window exceeds limit",                                         // MiniMax
-        r"exceeded model token limit",                                           // Kimi For Coding
-        r"too large for model with \d+ maximum context length",                  // Mistral
-        r"model_context_window_exceeded",                                        // z.ai surfaced as text
-        r"prompt too long; exceeded (?:max )?context length",                    // Ollama
-        r"context[_ ]length[_ ]exceeded",                                        // generic
-        r"too many tokens",                                                      // generic
-        r"token limit exceeded",                                                 // generic
-        r"^4(?:00|13)\s*(?:status code)?\s*\(no body\)",                         // Cerebras 400/413 no body
+        r"exceeds the limit of \d+",           // GitHub Copilot
+        r"exceeds the available context size", // llama.cpp
+        r"greater than the context length",    // LM Studio
+        r"context window exceeds limit",       // MiniMax
+        r"exceeded model token limit",         // Kimi For Coding
+        r"too large for model with \d+ maximum context length", // Mistral
+        r"model_context_window_exceeded",      // z.ai surfaced as text
+        r"prompt too long; exceeded (?:max )?context length", // Ollama
+        r"context[_ ]length[_ ]exceeded",      // generic
+        r"too many tokens",                    // generic
+        r"token limit exceeded",               // generic
+        r"^4(?:00|13)\s*(?:status code)?\s*\(no body\)", // Cerebras 400/413 no body
     ]
     .iter()
     .map(|p| Regex::new(&format!("(?i){p}")).expect("valid overflow regex"))
@@ -130,9 +130,14 @@ mod tests {
 
     #[test]
     fn detects_openai_and_gemini() {
-        assert!(is_context_overflow(&err_msg("Your input exceeds the context window of this model"), None));
         assert!(is_context_overflow(
-            &err_msg("The input token count (1196265) exceeds the maximum number of tokens allowed"),
+            &err_msg("Your input exceeds the context window of this model"),
+            None
+        ));
+        assert!(is_context_overflow(
+            &err_msg(
+                "The input token count (1196265) exceeds the maximum number of tokens allowed"
+            ),
             None
         ));
     }

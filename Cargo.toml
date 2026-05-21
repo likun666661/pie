@@ -42,6 +42,25 @@ regex = "1"
 tracing = "0.1"
 ignore = "0.4"
 
+# Lint policy applied to every workspace member that opts in via `lints.workspace = true`.
+# Pedantic clippy lints that flag style rather than bugs are downgraded to "allow"; everything
+# else still trips `-D warnings` in CI.
+[workspace.lints.clippy]
+large_enum_variant = "allow"
+module_inception = "allow"
+type_complexity = "allow"
+manual_div_ceil = "allow"
+too_many_arguments = "allow"
+new_without_default = "allow"
+# Tests / setup code holds short-lived std::Mutex guards across `.await`; we keep them on
+# purpose (the lock scope never crosses tokio runtime boundaries that would deadlock).
+await_holding_lock = "allow"
+# The struct-then-assign pattern is more readable than nested `Default::default()` overrides
+# when many fields are set conditionally.
+field_reassign_with_default = "allow"
+# `match` arm guards with `matches!` read clearer than nested patterns in our context.
+redundant_guards = "allow"
+
 [profile.dev]
 opt-level = 0
 

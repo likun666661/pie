@@ -89,9 +89,5 @@ required-features = ["anthropic"]
 name = "gpt55_hello"
 required-features = ["openai-responses"]
 
-[profile.dev]
-opt-level = 0
-
-[profile.release]
-lto = "thin"
-codegen-units = 1
+[lints]
+workspace = true

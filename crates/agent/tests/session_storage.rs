@@ -2,7 +2,7 @@
 //! `SessionStorage` trait surface.
 
 use pie_agent_core::{
-    build_session_context, JsonlSessionRepo, MemorySessionStorage, Session, SessionStorage,
+    JsonlSessionRepo, MemorySessionStorage, Session, SessionStorage, build_session_context,
 };
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -21,7 +21,10 @@ async fn memory_session_roundtrips_messages() {
     let session = Session::new(storage.clone() as Arc<dyn SessionStorage>);
 
     let id1 = session.append_message(user_message("first")).await.unwrap();
-    let id2 = session.append_message(user_message("second")).await.unwrap();
+    let id2 = session
+        .append_message(user_message("second"))
+        .await
+        .unwrap();
     assert_ne!(id1, id2);
 
     let leaf = session.leaf_id().await.unwrap();
@@ -73,7 +76,10 @@ async fn branch_walks_parent_chain_in_root_to_leaf_order() {
 async fn compaction_summary_replaces_history_up_to_first_kept() {
     let storage = Arc::new(MemorySessionStorage::new());
     let session = Session::new(storage as Arc<dyn SessionStorage>);
-    let _id1 = session.append_message(user_message("dropped")).await.unwrap();
+    let _id1 = session
+        .append_message(user_message("dropped"))
+        .await
+        .unwrap();
     let first_kept = session.append_message(user_message("kept")).await.unwrap();
     let _comp = session
         .append_compaction("summary text", &first_kept, 100, None, false)

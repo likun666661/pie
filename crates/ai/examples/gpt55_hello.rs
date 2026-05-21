@@ -29,7 +29,10 @@ async fn main() -> anyhow::Result<()> {
         tools: None,
     };
 
-    let opts = StreamOptions { max_tokens: Some(64), ..Default::default() };
+    let opts = StreamOptions {
+        max_tokens: Some(64),
+        ..Default::default()
+    };
     let mut s = stream(&model, &context, Some(&opts));
 
     while let Some(ev) = s.next().await {
@@ -43,7 +46,10 @@ async fn main() -> anyhow::Result<()> {
                 println!("\n--- done ---");
                 println!(
                     "model: {}   usage: in={} out={} cacheRead={}",
-                    message.model, message.usage.input, message.usage.output, message.usage.cache_read
+                    message.model,
+                    message.usage.input,
+                    message.usage.output,
+                    message.usage.cache_read
                 );
                 break;
             }

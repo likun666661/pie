@@ -12,7 +12,6 @@
 //! - `enqueue_steering` / `enqueue_follow_up` queue passthrough
 //! - `subscribe` to lifecycle events
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -22,8 +21,8 @@ use super::super::agent::{Agent, AgentListener, AgentOptions, AgentRunError};
 use super::super::types::*;
 
 use super::compaction::compaction::{
-    compact, estimate_context_tokens, should_compact, CompactionSettings, SummarizeError,
-    DEFAULT_COMPACTION_SETTINGS,
+    CompactionSettings, DEFAULT_COMPACTION_SETTINGS, SummarizeError, compact,
+    estimate_context_tokens, should_compact,
 };
 use super::messages::compaction_summary;
 use super::prompt_templates::PromptTemplateRegistry;
@@ -155,10 +154,7 @@ impl AgentHarness {
     }
 
     /// Switch model. Persists a `ModelChange` session entry so resume sees the right one.
-    pub async fn set_model(
-        &self,
-        model: Model,
-    ) -> Result<String, super::types::SessionError> {
+    pub async fn set_model(&self, model: Model) -> Result<String, super::types::SessionError> {
         let provider = model.provider.0.clone();
         let model_id = model.id.clone();
         let id = self.session.append_model_change(provider, model_id).await?;
@@ -197,7 +193,10 @@ impl AgentHarness {
         s.messages = ctx.messages;
         if let Some(model) = &ctx.model {
             // Try to find the model in our catalog; fall back to keeping the current one.
-            if let Some(m) = pie_ai::get_model(&pie_ai::Provider::from(model.provider.clone()), &model.model_id) {
+            if let Some(m) = pie_ai::get_model(
+                &pie_ai::Provider::from(model.provider.clone()),
+                &model.model_id,
+            ) {
                 s.model = Some(m);
             }
         }
@@ -217,7 +216,9 @@ impl AgentHarness {
         let template = match template {
             Some(t) => t,
             None => {
-                return Err(AgentRunError::Other(format!("unknown prompt template: {name}")));
+                return Err(AgentRunError::Other(format!(
+                    "unknown prompt template: {name}"
+                )));
             }
         };
         let rendered = PromptTemplateRegistry::interpolate(&template, &vars);
@@ -371,8 +372,7 @@ impl AgentHarness {
         // anything that came after the cut point.
         {
             let mut s = self.agent.state();
-            let mut new_msgs: Vec<AgentMessage> =
-                vec![compaction_summary(result.summary.clone())];
+            let mut new_msgs: Vec<AgentMessage> = vec![compaction_summary(result.summary.clone())];
             // Find first_kept_entry_id in the state.messages (none of which carry ids); a
             // simple heuristic is to drop everything older than the cut and keep the tail.
             // Concretely: keep the last N messages whose estimated tokens sum to at most

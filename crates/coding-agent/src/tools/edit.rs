@@ -44,7 +44,9 @@ impl AgentTool for EditTool {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
         if old == new_ {
-            return Err(AgentToolError::from("old_string must differ from new_string"));
+            return Err(AgentToolError::from(
+                "old_string must differ from new_string",
+            ));
         }
 
         let body = tokio::fs::read_to_string(path)
@@ -63,7 +65,11 @@ impl AgentTool for EditTool {
             )));
         }
 
-        let new_body = if replace_all { body.replace(old, new_) } else { body.replacen(old, new_, 1) };
+        let new_body = if replace_all {
+            body.replace(old, new_)
+        } else {
+            body.replacen(old, new_, 1)
+        };
         tokio::fs::write(path, new_body.as_bytes())
             .await
             .map_err(|e| AgentToolError::from(format!("write {path}: {e}")))?;
@@ -104,7 +110,8 @@ fn render_diff_preview(old: &str, new_: &str) -> String {
 }
 
 use once_cell::sync::Lazy;
-static DEFINITION: Lazy<Tool> = Lazy::new(|| Tool {
+static DEFINITION: Lazy<Tool> = Lazy::new(|| {
+    Tool {
     name: "edit".into(),
     description:
         "Replace an exact substring in a file. The substring must be unique unless `replace_all` is true. Use `read` first to confirm the exact text to match, including surrounding context."
@@ -119,6 +126,7 @@ static DEFINITION: Lazy<Tool> = Lazy::new(|| Tool {
         },
         "required": ["path", "old_string", "new_string"],
     }),
+}
 });
 
 #[cfg(test)]

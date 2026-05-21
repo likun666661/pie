@@ -15,9 +15,7 @@
 use std::sync::Arc;
 
 use once_cell::sync::Lazy;
-use pie_agent_core::{
-    AgentEvent, AgentHarness, AgentListener, AgentMessage, AgentRunError,
-};
+use pie_agent_core::{AgentEvent, AgentHarness, AgentListener, AgentMessage, AgentRunError};
 use pie_ai::{AssistantMessage as PiAssistantMessage, Message as PiMessage};
 use regex::Regex;
 
@@ -31,7 +29,12 @@ pub struct RetrySettings {
 
 impl Default for RetrySettings {
     fn default() -> Self {
-        Self { enabled: true, max_retries: 5, base_delay_ms: 1_000, max_delay_ms: 60_000 }
+        Self {
+            enabled: true,
+            max_retries: 5,
+            base_delay_ms: 1_000,
+            max_delay_ms: 60_000,
+        }
     }
 }
 
@@ -59,11 +62,13 @@ impl AgentSession {
         Self { harness, settings }
     }
 
+    #[allow(dead_code)] // public API for embedders; not used by the binary itself.
     pub fn harness(&self) -> &AgentHarness {
         &self.harness
     }
 
     /// Subscribe to underlying lifecycle events. Useful for UI listeners.
+    #[allow(dead_code)] // public API for embedders; not used by the binary itself.
     pub fn subscribe(&self, listener: AgentListener) -> impl FnOnce() {
         self.harness.subscribe(listener)
     }
@@ -102,9 +107,11 @@ impl AgentSession {
             // Check the latest assistant message to decide retryability.
             let assistant = self.last_assistant();
             let retryable = match (&assistant, &last_err) {
-                (Some(a), _) if a.stop_reason == pie_ai::StopReason::Error => {
-                    a.error_message.as_deref().map(is_retryable_error).unwrap_or(false)
-                }
+                (Some(a), _) if a.stop_reason == pie_ai::StopReason::Error => a
+                    .error_message
+                    .as_deref()
+                    .map(is_retryable_error)
+                    .unwrap_or(false),
                 (_, Some(e)) => is_retryable_error(&format!("{e}")),
                 _ => false,
             };
@@ -116,7 +123,11 @@ impl AgentSession {
             }
 
             attempt += 1;
-            let delay_ms = backoff_ms(attempt, self.settings.base_delay_ms, self.settings.max_delay_ms);
+            let delay_ms = backoff_ms(
+                attempt,
+                self.settings.base_delay_ms,
+                self.settings.max_delay_ms,
+            );
             tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
 
             // Drop the failed assistant message from agent state so continue_() doesn't replay
@@ -141,7 +152,10 @@ impl AgentSession {
         if a.stop_reason != pie_ai::StopReason::Error {
             return false;
         }
-        a.error_message.as_deref().map(is_retryable_error).unwrap_or(false)
+        a.error_message
+            .as_deref()
+            .map(is_retryable_error)
+            .unwrap_or(false)
     }
 
     fn pop_failed_assistant(&self) {
@@ -164,13 +178,24 @@ fn backoff_ms(attempt: u32, base: u64, max: u64) -> u64 {
 
 // Lifecycle events the wrapper emits on its own (not via Agent). Consumers wanting visibility
 // into retries subscribe to these.
+#[allow(dead_code)] // declared for future embedder use; the binary doesn't emit these yet.
 #[derive(Clone, Debug)]
 pub enum AgentSessionEvent {
-    AutoRetryStart { attempt: u32, max_attempts: u32, delay_ms: u64, error_message: String },
-    AutoRetryEnd { success: bool, attempt: u32, final_error: Option<String> },
+    AutoRetryStart {
+        attempt: u32,
+        max_attempts: u32,
+        delay_ms: u64,
+        error_message: String,
+    },
+    AutoRetryEnd {
+        success: bool,
+        attempt: u32,
+        final_error: Option<String>,
+    },
 }
 
 /// Convert a base `AgentEvent` listener type into the kind we use here for symmetry.
+#[allow(dead_code)]
 pub fn forward_to_listener(_: AgentEvent) {}
 
 #[cfg(test)]
@@ -180,7 +205,9 @@ mod tests {
     #[test]
     fn retryable_patterns_match_ts_regex() {
         assert!(is_retryable_error("overloaded_error"));
-        assert!(is_retryable_error("Provider returned error: 429 Too Many Requests"));
+        assert!(is_retryable_error(
+            "Provider returned error: 429 Too Many Requests"
+        ));
         assert!(is_retryable_error("rate limit exceeded"));
         assert!(is_retryable_error("HTTP 503 Service Unavailable"));
         assert!(is_retryable_error("websocket closed"));

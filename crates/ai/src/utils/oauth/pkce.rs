@@ -17,5 +17,8 @@ pub fn generate_pkce() -> PkcePair {
     hasher.update(verifier.as_bytes());
     let digest = hasher.finalize();
     let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest);
-    PkcePair { verifier, challenge }
+    PkcePair {
+        verifier,
+        challenge,
+    }
 }

@@ -9,6 +9,7 @@ use pie_agent_core::{JsonlSessionRepo, Session};
 use crate::config::sessions_dir_for_cwd;
 
 pub struct SessionEntry {
+    #[allow(dead_code)] // listed via the public API; not read by the CLI itself.
     pub path: PathBuf,
     pub id: String,
     pub created_at: String,
@@ -25,10 +26,7 @@ pub async fn create(repo: &JsonlSessionRepo, cwd: &std::path::Path) -> Result<Se
 }
 
 /// Resume the most recent session for this cwd, or a specific one by id when supplied.
-pub async fn resume(
-    repo: &JsonlSessionRepo,
-    explicit_id: Option<&str>,
-) -> Result<Session> {
+pub async fn resume(repo: &JsonlSessionRepo, explicit_id: Option<&str>) -> Result<Session> {
     let files = repo.list().await?;
     if files.is_empty() {
         bail!("no sessions to resume in {}", repo.root().display());
@@ -58,10 +56,23 @@ pub async fn list_entries(repo: &JsonlSessionRepo) -> Result<Vec<SessionEntry>> 
     for path in repo.list().await? {
         let session = repo.open(&path).await?;
         let meta = session.storage().get_metadata_json().await?;
-        let id = meta.get("id").and_then(|v| v.as_str()).unwrap_or("?").to_string();
-        let created_at = meta.get("createdAt").and_then(|v| v.as_str()).unwrap_or("?").to_string();
+        let id = meta
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?")
+            .to_string();
+        let created_at = meta
+            .get("createdAt")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?")
+            .to_string();
         let preview = first_user_text(&session).await;
-        out.push(SessionEntry { path, id, created_at, preview });
+        out.push(SessionEntry {
+            path,
+            id,
+            created_at,
+            preview,
+        });
     }
     Ok(out)
 }

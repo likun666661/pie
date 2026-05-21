@@ -15,7 +15,9 @@ pub struct MemorySessionRepo {
 
 impl MemorySessionRepo {
     pub fn new() -> Self {
-        Self { sessions: Mutex::new(Vec::new()) }
+        Self {
+            sessions: Mutex::new(Vec::new()),
+        }
     }
 
     /// Create a new in-memory session and return it.

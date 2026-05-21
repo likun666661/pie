@@ -1,5 +1,4 @@
-use pie_agent_core::{AgentMessage, JsonlSessionRepo, Session, SessionStorage};
-use std::sync::Arc;
+use pie_agent_core::{AgentMessage, JsonlSessionRepo};
 
 #[tokio::main]
 async fn main() {

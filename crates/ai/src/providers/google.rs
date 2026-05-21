@@ -14,7 +14,9 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::api_registry::ApiProvider;
-use crate::providers::google_shared::{convert_messages, convert_tools, is_thinking_part, map_stop_reason};
+use crate::providers::google_shared::{
+    convert_messages, convert_tools, is_thinking_part, map_stop_reason,
+};
 use crate::types::*;
 use crate::utils::event_stream::{AssistantMessageEventSender, AssistantMessageEventStream};
 use crate::utils::sse::SseStream;
@@ -80,7 +82,8 @@ pub(crate) fn translate_simple(options: Option<&SimpleStreamOptions>) -> StreamO
                         ThinkingLevel::High | ThinkingLevel::Xhigh => b.high,
                     })
                     .unwrap_or(8192);
-                base.provider_extras.insert("thinking_budget".to_string(), json!(budget));
+                base.provider_extras
+                    .insert("thinking_budget".to_string(), json!(budget));
             }
             base
         })
@@ -100,7 +103,11 @@ async fn run(
     {
         Some(k) => k,
         None => {
-            push_error(&mut sender, &model, "GOOGLE_API_KEY / GEMINI_API_KEY is not set".into());
+            push_error(
+                &mut sender,
+                &model,
+                "GOOGLE_API_KEY / GEMINI_API_KEY is not set".into(),
+            );
             return;
         }
     };
@@ -160,7 +167,9 @@ pub(crate) async fn consume_gemini_sse(
     mut sender: AssistantMessageEventSender,
 ) {
     let mut partial = empty_partial(model);
-    sender.push(AssistantMessageEvent::Start { partial: partial.clone() });
+    sender.push(AssistantMessageEvent::Start {
+        partial: partial.clone(),
+    });
 
     // Track open text/thinking block kind: 0 = none, 1 = text, 2 = thinking.
     let mut open: u8 = 0;
@@ -186,8 +195,9 @@ pub(crate) async fn consume_gemini_sse(
             }
         }
 
-        if let Some(parts) =
-            chunk.pointer("/candidates/0/content/parts").and_then(|v| v.as_array())
+        if let Some(parts) = chunk
+            .pointer("/candidates/0/content/parts")
+            .and_then(|v| v.as_array())
         {
             for part in parts {
                 if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
@@ -196,7 +206,9 @@ pub(crate) async fn consume_gemini_sse(
                     if open != want {
                         close_open_block(open, &mut partial, &mut sender);
                         if is_thinking {
-                            partial.content.push(ContentBlock::Thinking(ThinkingContent::default()));
+                            partial
+                                .content
+                                .push(ContentBlock::Thinking(ThinkingContent::default()));
                             sender.push(AssistantMessageEvent::ThinkingStart {
                                 content_index: partial.content.len() - 1,
                                 partial: partial.clone(),
@@ -235,11 +247,18 @@ pub(crate) async fn consume_gemini_sse(
                 if let Some(fc) = part.get("functionCall") {
                     close_open_block(open, &mut partial, &mut sender);
                     open = 0;
-                    let name = fc.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let name = fc
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     let provided = fc.get("id").and_then(|v| v.as_str()).unwrap_or("");
                     let id = if provided.is_empty() {
                         tool_counter += 1;
-                        format!("{name}_{}_{tool_counter}", chrono::Utc::now().timestamp_millis())
+                        format!(
+                            "{name}_{}_{tool_counter}",
+                            chrono::Utc::now().timestamp_millis()
+                        )
                     } else {
                         provided.to_string()
                     };
@@ -257,7 +276,9 @@ pub(crate) async fn consume_gemini_sse(
                             .and_then(|v| v.as_str())
                             .map(|s| s.to_string()),
                     };
-                    partial.content.push(ContentBlock::ToolCall(tool_call.clone()));
+                    partial
+                        .content
+                        .push(ContentBlock::ToolCall(tool_call.clone()));
                     let idx = partial.content.len() - 1;
                     sender.push(AssistantMessageEvent::ToolCallStart {
                         content_index: idx,
@@ -277,11 +298,16 @@ pub(crate) async fn consume_gemini_sse(
             }
         }
 
-        if let Some(reason) =
-            chunk.pointer("/candidates/0/finishReason").and_then(|v| v.as_str())
+        if let Some(reason) = chunk
+            .pointer("/candidates/0/finishReason")
+            .and_then(|v| v.as_str())
         {
             partial.stop_reason = map_stop_reason(reason);
-            if partial.content.iter().any(|b| matches!(b, ContentBlock::ToolCall(_))) {
+            if partial
+                .content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::ToolCall(_)))
+            {
                 partial.stop_reason = StopReason::ToolUse;
             }
         }
@@ -297,7 +323,9 @@ pub(crate) async fn consume_gemini_sse(
         StopReason::ToolUse => DoneReason::ToolUse,
         StopReason::Length => DoneReason::Length,
         StopReason::Error => {
-            partial.error_message.get_or_insert_with(|| "google error".into());
+            partial
+                .error_message
+                .get_or_insert_with(|| "google error".into());
             sender.push(AssistantMessageEvent::Error {
                 reason: ErrorReason::Error,
                 error: partial,
@@ -306,7 +334,10 @@ pub(crate) async fn consume_gemini_sse(
         }
         _ => DoneReason::Stop,
     };
-    sender.push(AssistantMessageEvent::Done { reason, message: partial });
+    sender.push(AssistantMessageEvent::Done {
+        reason,
+        message: partial,
+    });
 }
 
 fn close_open_block(
@@ -338,10 +369,22 @@ fn close_open_block(
 }
 
 fn update_usage(usage: &mut Usage, u: &Value) {
-    let prompt = u.get("promptTokenCount").and_then(|v| v.as_u64()).unwrap_or(0);
-    let cached = u.get("cachedContentTokenCount").and_then(|v| v.as_u64()).unwrap_or(0);
-    let candidates = u.get("candidatesTokenCount").and_then(|v| v.as_u64()).unwrap_or(0);
-    let thoughts = u.get("thoughtsTokenCount").and_then(|v| v.as_u64()).unwrap_or(0);
+    let prompt = u
+        .get("promptTokenCount")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let cached = u
+        .get("cachedContentTokenCount")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let candidates = u
+        .get("candidatesTokenCount")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let thoughts = u
+        .get("thoughtsTokenCount")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
     usage.input = prompt.saturating_sub(cached);
     usage.output = candidates + thoughts;
     usage.cache_read = cached;
@@ -404,7 +447,10 @@ pub(crate) fn push_error(sender: &mut AssistantMessageEventSender, model: &Model
     let mut p = empty_partial(model);
     p.stop_reason = StopReason::Error;
     p.error_message = Some(msg);
-    sender.push(AssistantMessageEvent::Error { reason: ErrorReason::Error, error: p });
+    sender.push(AssistantMessageEvent::Error {
+        reason: ErrorReason::Error,
+        error: p,
+    });
 }
 
 #[cfg(test)]
@@ -440,10 +486,17 @@ mod tests {
             tools: None,
         };
         let mut opts = StreamOptions::default();
-        opts.provider_extras.insert("thinking_budget".into(), json!(4096));
+        opts.provider_extras
+            .insert("thinking_budget".into(), json!(4096));
         let body = build_request_body(&ctx, &opts);
-        assert_eq!(body["generationConfig"]["thinkingConfig"]["thinkingBudget"], 4096);
-        assert_eq!(body["generationConfig"]["thinkingConfig"]["includeThoughts"], true);
+        assert_eq!(
+            body["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+            4096
+        );
+        assert_eq!(
+            body["generationConfig"]["thinkingConfig"]["includeThoughts"],
+            true
+        );
     }
 
     #[test]
@@ -458,6 +511,9 @@ mod tests {
             }]),
         };
         let body = build_request_body(&ctx, &Default::default());
-        assert_eq!(body["tools"][0]["functionDeclarations"][0]["name"], "lookup");
+        assert_eq!(
+            body["tools"][0]["functionDeclarations"][0]["name"],
+            "lookup"
+        );
     }
 }

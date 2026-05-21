@@ -36,7 +36,10 @@ pub fn append_faux_responses(responses: Vec<AssistantMessage>) {
 
 /// Clear the queue.
 pub fn clear_faux_responses() {
-    response_queue().lock().expect("faux queue poisoned").clear();
+    response_queue()
+        .lock()
+        .expect("faux queue poisoned")
+        .clear();
 }
 
 // ── builders ──────────────────────────────────────────────────────────────────────────────
@@ -53,7 +56,10 @@ pub fn faux_thinking(thinking: impl Into<String>) -> ContentBlock {
     })
 }
 
-pub fn faux_tool_call(name: impl Into<String>, arguments: Map<String, serde_json::Value>) -> ContentBlock {
+pub fn faux_tool_call(
+    name: impl Into<String>,
+    arguments: Map<String, serde_json::Value>,
+) -> ContentBlock {
     ContentBlock::ToolCall(ToolCall {
         id: format!("faux_{}", uuid::Uuid::new_v4().simple()),
         name: name.into(),
@@ -63,7 +69,9 @@ pub fn faux_tool_call(name: impl Into<String>, arguments: Map<String, serde_json
 }
 
 pub fn faux_assistant_message(content: Vec<ContentBlock>) -> AssistantMessage {
-    let has_tool = content.iter().any(|b| matches!(b, ContentBlock::ToolCall(_)));
+    let has_tool = content
+        .iter()
+        .any(|b| matches!(b, ContentBlock::ToolCall(_)));
     AssistantMessage {
         role: AssistantRole::Assistant,
         content,
@@ -74,7 +82,11 @@ pub fn faux_assistant_message(content: Vec<ContentBlock>) -> AssistantMessage {
         response_id: None,
         diagnostics: None,
         usage: Usage::default(),
-        stop_reason: if has_tool { StopReason::ToolUse } else { StopReason::Stop },
+        stop_reason: if has_tool {
+            StopReason::ToolUse
+        } else {
+            StopReason::Stop
+        },
         error_message: None,
         timestamp: chrono::Utc::now().timestamp_millis(),
     }
@@ -96,7 +108,10 @@ impl ApiProvider for FauxProvider {
         _options: Option<&StreamOptions>,
     ) -> AssistantMessageEventStream {
         let (stream, mut sender) = AssistantMessageEventStream::new();
-        let queued = response_queue().lock().expect("faux queue poisoned").pop_front();
+        let queued = response_queue()
+            .lock()
+            .expect("faux queue poisoned")
+            .pop_front();
         let msg = queued.unwrap_or_else(|| AssistantMessage {
             role: AssistantRole::Assistant,
             content: vec![ContentBlock::text("[faux] hello")],
@@ -129,9 +144,14 @@ impl ApiProvider for FauxProvider {
 /// Replay a finished `AssistantMessage` as a normal streaming event sequence.
 fn replay(msg: AssistantMessage, sender: &mut AssistantMessageEventSender) {
     // Build the partial incrementally so each event carries a faithful snapshot.
-    let mut partial = AssistantMessage { content: vec![], ..msg.clone() };
+    let mut partial = AssistantMessage {
+        content: vec![],
+        ..msg.clone()
+    };
     partial.stop_reason = StopReason::Stop;
-    sender.push(AssistantMessageEvent::Start { partial: partial.clone() });
+    sender.push(AssistantMessageEvent::Start {
+        partial: partial.clone(),
+    });
 
     for (idx, block) in msg.content.iter().enumerate() {
         match block {
@@ -156,7 +176,9 @@ fn replay(msg: AssistantMessage, sender: &mut AssistantMessageEventSender) {
                 });
             }
             ContentBlock::Thinking(t) => {
-                partial.content.push(ContentBlock::Thinking(ThinkingContent::default()));
+                partial
+                    .content
+                    .push(ContentBlock::Thinking(ThinkingContent::default()));
                 sender.push(AssistantMessageEvent::ThinkingStart {
                     content_index: idx,
                     partial: partial.clone(),
@@ -219,7 +241,10 @@ fn replay(msg: AssistantMessage, sender: &mut AssistantMessageEventSender) {
         }
         StopReason::Stop => DoneReason::Stop,
     };
-    sender.push(AssistantMessageEvent::Done { reason, message: msg });
+    sender.push(AssistantMessageEvent::Done {
+        reason,
+        message: msg,
+    });
 }
 
 #[cfg(test)]
@@ -289,7 +314,10 @@ mod tests {
         let _guard = test_lock();
         clear_faux_responses();
         let provider = FauxProvider::default();
-        let msg = provider.stream(&faux_model(), &Context::default(), None).result().await;
+        let msg = provider
+            .stream(&faux_model(), &Context::default(), None)
+            .result()
+            .await;
         assert!(msg.is_some());
     }
 }

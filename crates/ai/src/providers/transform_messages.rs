@@ -60,10 +60,8 @@ fn downgrade_unsupported_images(messages: Vec<Message>, model: &Model) -> Vec<Me
                 Message::User(u)
             }
             Message::ToolResult(mut tr) => {
-                tr.content = replace_images_with_placeholder(
-                    &tr.content,
-                    NON_VISION_TOOL_IMAGE_PLACEHOLDER,
-                );
+                tr.content =
+                    replace_images_with_placeholder(&tr.content, NON_VISION_TOOL_IMAGE_PLACEHOLDER);
                 Message::ToolResult(tr)
             }
             other => other,
@@ -145,7 +143,10 @@ pub fn transform_messages(
                         ContentBlock::Image(_) => new_content.push(block.clone()),
                     }
                 }
-                Message::Assistant(AssistantMessage { content: new_content, ..a })
+                Message::Assistant(AssistantMessage {
+                    content: new_content,
+                    ..a
+                })
             }
         })
         .collect();
@@ -277,7 +278,11 @@ mod tests {
     #[test]
     fn errored_assistant_is_skipped() {
         let msgs = vec![
-            assistant_from("openai", vec![ContentBlock::text("partial")], StopReason::Error),
+            assistant_from(
+                "openai",
+                vec![ContentBlock::text("partial")],
+                StopReason::Error,
+            ),
             Message::User(UserMessage {
                 role: UserRole::User,
                 content: UserContent::Text("next".into()),
@@ -313,7 +318,9 @@ mod tests {
         let out = transform_messages(msgs, &target_model(), None);
         // assistant, synthetic toolResult, user
         assert_eq!(out.len(), 3);
-        assert!(matches!(out[1], Message::ToolResult(ref tr) if tr.is_error && tr.tool_call_id == "call_1"));
+        assert!(
+            matches!(out[1], Message::ToolResult(ref tr) if tr.is_error && tr.tool_call_id == "call_1")
+        );
     }
 
     #[test]
@@ -333,7 +340,9 @@ mod tests {
         if let Message::User(u) = &out[0] {
             if let UserContent::Blocks(blocks) = &u.content {
                 assert_eq!(blocks.len(), 2);
-                assert!(matches!(&blocks[1], UserContentBlock::Text(t) if t.text.contains("image omitted")));
+                assert!(
+                    matches!(&blocks[1], UserContentBlock::Text(t) if t.text.contains("image omitted"))
+                );
             } else {
                 panic!("expected blocks");
             }

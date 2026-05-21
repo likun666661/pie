@@ -16,7 +16,9 @@
 use async_trait::async_trait;
 
 use crate::api_registry::ApiProvider;
-use crate::providers::google::{build_request_body, consume_gemini_sse, push_error, translate_simple};
+use crate::providers::google::{
+    build_request_body, consume_gemini_sse, push_error, translate_simple,
+};
 use crate::types::*;
 use crate::utils::event_stream::{AssistantMessageEventSender, AssistantMessageEventStream};
 
@@ -93,7 +95,11 @@ async fn run(
     let project = match std::env::var("GOOGLE_VERTEX_PROJECT") {
         Ok(p) if !p.is_empty() => p,
         _ => {
-            push_error(&mut sender, &model, "GOOGLE_VERTEX_PROJECT is not set".into());
+            push_error(
+                &mut sender,
+                &model,
+                "GOOGLE_VERTEX_PROJECT is not set".into(),
+            );
             return;
         }
     };
@@ -139,7 +145,11 @@ async fn run(
     if !resp.status().is_success() {
         let status = resp.status();
         let txt = resp.text().await.unwrap_or_default();
-        push_error(&mut sender, &model, format!("Vertex API error ({status}): {txt}"));
+        push_error(
+            &mut sender,
+            &model,
+            format!("Vertex API error ({status}): {txt}"),
+        );
         return;
     }
 
@@ -152,7 +162,10 @@ mod tests {
 
     #[test]
     fn host_is_regional_or_global() {
-        assert_eq!(vertex_host("us-central1"), "https://us-central1-aiplatform.googleapis.com");
+        assert_eq!(
+            vertex_host("us-central1"),
+            "https://us-central1-aiplatform.googleapis.com"
+        );
         assert_eq!(vertex_host("global"), "https://aiplatform.googleapis.com");
     }
 }

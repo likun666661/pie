@@ -71,6 +71,7 @@ impl Registry {
         r.register(Arc::new(ThinkingCommand));
         r.register(Arc::new(CostCommand));
         r.register(Arc::new(DiagCommand));
+        r.register(Arc::new(TemplateCommand));
         r
     }
 
@@ -388,6 +389,52 @@ impl SlashCommand for DiagCommand {
         println!("  log file      {log}");
         println!();
         CommandOutcome::Handled
+    }
+}
+
+struct TemplateCommand;
+
+#[async_trait]
+impl SlashCommand for TemplateCommand {
+    fn name(&self) -> &'static str {
+        "template"
+    }
+    fn description(&self) -> &'static str {
+        "list templates, or run one with /template <name> [k=v ...]"
+    }
+    fn usage(&self) -> &'static str {
+        "[name] [k=v ...]"
+    }
+    async fn run(&self, argv: &[String], ctx: &CommandCtx<'_>) -> CommandOutcome {
+        if argv.is_empty() {
+            let templates = ctx.harness.templates();
+            if templates.is_empty() {
+                println!(
+                    "(no templates loaded — drop `.md` files under ~/.pie/templates/ or <cwd>/.pie/templates/)"
+                );
+            } else {
+                println!("Loaded templates ({}):", templates.len());
+                for t in &templates {
+                    let desc = t.description.clone().unwrap_or_default();
+                    println!("  /template {}  {}", t.name, desc);
+                }
+            }
+            return CommandOutcome::Handled;
+        }
+        let name = argv[0].clone();
+        // Remaining args are `k=v` pairs.
+        let mut vars = serde_json::Map::new();
+        for arg in &argv[1..] {
+            if let Some((k, v)) = arg.split_once('=') {
+                vars.insert(k.to_string(), serde_json::Value::String(v.to_string()));
+            } else {
+                return CommandOutcome::Error(format!("expected k=v argument; got: {arg}"));
+            }
+        }
+        match ctx.harness.prompt_from_template(&name, vars).await {
+            Ok(()) => CommandOutcome::Handled,
+            Err(e) => CommandOutcome::Error(format!("template run failed: {e}")),
+        }
     }
 }
 

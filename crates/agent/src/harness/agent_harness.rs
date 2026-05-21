@@ -219,6 +219,12 @@ impl AgentHarness {
         self.skills.lock().clone()
     }
 
+    /// Snapshot of the loaded prompt templates. Listing-only — callers run them via
+    /// [`Self::prompt_from_template`].
+    pub fn templates(&self) -> Vec<PromptTemplate> {
+        self.templates.lock().list().to_vec()
+    }
+
     pub fn system_prompt(&self) -> String {
         self.agent.state().system_prompt.clone()
     }

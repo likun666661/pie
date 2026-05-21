@@ -12,6 +12,7 @@ mod logging;
 mod model;
 mod session;
 mod skills;
+mod templates;
 mod tools;
 mod tui;
 
@@ -141,12 +142,14 @@ async fn run_repl(cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo) -> 
     let system_prompt = compose_system_prompt(&cwd, &memory_block, &tool_names);
 
     let loaded_skills = skills::load_all(&cwd).await;
+    let loaded_templates = templates::load_all(&cwd).await;
 
     let mut opts = AgentHarnessOptions::new(model.clone(), session.clone());
     opts.system_prompt = system_prompt;
     opts.thinking_level = thinking;
     opts.tools = tools;
     opts.skills = loaded_skills.skills.clone();
+    opts.prompt_templates = loaded_templates.templates.clone();
     opts.before_tool_call =
         Some(PermissionPolicy::default_for_coding_agent().as_before_tool_call());
     let harness = std::sync::Arc::new(AgentHarness::new(opts));
@@ -178,6 +181,25 @@ async fn run_repl(cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo) -> 
                 .map(|s| s.name.as_str())
                 .collect::<Vec<_>>()
                 .join(", ")
+        ));
+    }
+    if !loaded_templates.templates.is_empty() {
+        tui.system_line(&format!(
+            "loaded {} template(s): {}",
+            loaded_templates.templates.len(),
+            loaded_templates
+                .templates
+                .iter()
+                .map(|t| t.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if !loaded_templates.diagnostics.is_empty() {
+        tui.system_line(&format!(
+            "templates loader: {} diagnostic(s), first: {}",
+            loaded_templates.diagnostics.len(),
+            loaded_templates.diagnostics[0].message
         ));
     }
     if !loaded_skills.diagnostics.is_empty() {

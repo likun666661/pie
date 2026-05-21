@@ -42,6 +42,7 @@ pub use harness::{
     },
     messages,
     permission::{PermissionDecision, PermissionPolicy},
+    prompt_templates::{LoadTemplatesOutput, PromptTemplateRegistry, load_templates},
     session::{
         jsonl_repo::JsonlSessionRepo,
         jsonl_storage::JsonlSessionStorage,

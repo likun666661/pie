@@ -8,6 +8,7 @@ pub mod find;
 pub mod git;
 pub mod grep;
 pub mod ls;
+pub mod mcp_adapter;
 pub mod memory;
 pub mod read;
 pub mod task;

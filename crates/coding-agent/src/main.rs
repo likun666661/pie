@@ -12,6 +12,7 @@ mod config;
 mod export;
 mod images;
 mod logging;
+mod mcp_loader;
 mod mentions;
 mod model;
 mod session;
@@ -145,6 +146,12 @@ async fn run_repl(mut cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo)
     // Task delegation tool (issue #11). Shares the parent's model + stream backend so its
     // subagents go through the same provider.
     tools.push(tools::task_tool(model.clone(), None));
+
+    // MCP (issue #9): spawn every server configured under ~/.pie/mcp.toml or
+    // <cwd>/.pie/mcp.toml, append their tools to the registry.
+    let mcp = mcp_loader::load_all(&cwd).await;
+    let mcp_tool_count = mcp.tools.len();
+    tools.extend(mcp.tools);
     let tool_names = tools
         .iter()
         .map(|tool| tool.definition().name.clone())
@@ -205,6 +212,15 @@ async fn run_repl(mut cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo)
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
+    }
+    if mcp.client_count > 0 {
+        tui.system_line(&format!(
+            "mcp: connected to {} server(s), {mcp_tool_count} extra tool(s)",
+            mcp.client_count,
+        ));
+    }
+    for diag in &mcp.diagnostics {
+        tui.error_line(&format!("mcp: {diag}"));
     }
     if !loaded_templates.diagnostics.is_empty() {
         tui.system_line(&format!(

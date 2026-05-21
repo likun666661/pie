@@ -73,6 +73,7 @@ base64 = "0.22"
 sha2 = "0.10"
 hex = "0.4"
 hmac = "0.12"
+async-stream = "0.3"
 uuid = { version = "1", features = ["v4", "serde"] }
 tracing = "0.1"
 regex = "1"

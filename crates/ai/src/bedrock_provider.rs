@@ -107,8 +107,95 @@ pub enum BedrockError {
     Other(String),
 }
 
-/// Entry-point placeholder kept for backwards compat with prior register() callers; no
-/// real registration into the provider table happens until the streaming impl is in.
+/// Streaming Bedrock invocation. POSTs to `/invoke-with-response-stream`, reads the response
+/// body in chunks, frames them through the AWS event-stream parser, and yields one parsed
+/// [`crate::event_stream::EventMessage`] per emitted frame. Caller decodes the model-specific
+/// payload (Anthropic on Bedrock returns JSON inside each chunk's payload).
+pub async fn invoke_stream(
+    creds: &BedrockCreds,
+    model_id: &str,
+    body: &serde_json::Value,
+) -> Result<
+    impl futures::Stream<Item = Result<crate::event_stream::EventMessage, BedrockError>>,
+    BedrockError,
+> {
+    use futures::StreamExt as _;
+    let endpoint = format!(
+        "https://bedrock-runtime.{}.amazonaws.com/model/{}/invoke-with-response-stream",
+        creds.region, model_id
+    );
+    let url = url::Url::parse(&endpoint).map_err(|e| BedrockError::Other(e.to_string()))?;
+    let payload = serde_json::to_vec(body).map_err(|e| BedrockError::Other(e.to_string()))?;
+    let amz_date = Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+    let signed = sigv4::sign(&SigningRequest {
+        method: "POST",
+        url: &url,
+        headers: &[
+            ("content-type", "application/json"),
+            ("accept", "application/vnd.amazon.eventstream"),
+        ],
+        payload: &payload,
+        region: &creds.region,
+        service: "bedrock",
+        access_key: &creds.access_key,
+        secret_key: &creds.secret_key,
+        session_token: creds.session_token.as_deref(),
+        amz_date: &amz_date,
+    });
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(300))
+        .build()
+        .map_err(|e| BedrockError::Other(format!("http client: {e}")))?;
+    let mut req = client
+        .post(&endpoint)
+        .header("authorization", signed.authorization)
+        .header("content-type", "application/json")
+        .header("accept", "application/vnd.amazon.eventstream")
+        .body(payload);
+    for (k, v) in &signed.headers {
+        req = req.header(k.as_str(), v.as_str());
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| BedrockError::Network(e.to_string()))?;
+    if !resp.status().is_success() {
+        let status = resp.status().as_u16();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(BedrockError::Status {
+            status,
+            body: body.chars().take(500).collect(),
+        });
+    }
+
+    // Stream-buffer event-stream frames as bytes arrive. We append every chunk to a rolling
+    // buffer and try to parse from the head until a partial frame is at the tail; then wait
+    // for more bytes.
+    let byte_stream = resp.bytes_stream();
+    let parsed = async_stream::try_stream! {
+        let mut buf: Vec<u8> = Vec::new();
+        futures::pin_mut!(byte_stream);
+        while let Some(chunk) = byte_stream.next().await {
+            let bytes = chunk.map_err(|e| BedrockError::Network(e.to_string()))?;
+            buf.extend_from_slice(&bytes);
+            loop {
+                match crate::event_stream::parse_message(&buf) {
+                    Ok((msg, consumed)) => {
+                        buf.drain(..consumed);
+                        yield msg;
+                    }
+                    Err(crate::event_stream::EventStreamError::Short { .. }) => break,
+                    Err(e) => Err(BedrockError::Other(format!("event-stream parse: {e}")))?,
+                }
+            }
+        }
+    };
+    Ok(parsed)
+}
+
+/// Entry-point placeholder kept for backwards compat with prior register() callers; the
+/// streaming/non-streaming invokers above are the actual provider API.
 pub fn register() {}
 
 #[cfg(test)]

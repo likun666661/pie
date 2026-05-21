@@ -12,6 +12,7 @@ mod commands;
 mod config;
 mod export;
 mod extensions;
+mod history;
 mod images;
 mod logging;
 mod lsp;
@@ -24,6 +25,7 @@ mod oauth;
 mod otlp;
 mod session;
 mod skills;
+mod spinner;
 mod templates;
 mod tools;
 mod tui;
@@ -315,6 +317,10 @@ async fn run_repl(mut cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo)
 
     let registry = commands::Registry::with_builtins();
 
+    // Persistent input history (issue #2). Loaded once at startup; each successful prompt
+    // submission appends + persists.
+    let mut history = history::HistoryStore::load();
+
     // REPL — async stdin so we can race a Ctrl-C abort against the in-flight prompt.
     let mut stdin = tokio::io::BufReader::new(tokio::io::stdin()).lines();
     let mut last_idle_ctrlc: Option<Instant> = None;
@@ -410,9 +416,14 @@ async fn run_repl(mut cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo)
         let aborted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let aborted_for_signal = aborted.clone();
         let harness_for_signal = harness.clone();
+        // Append to persistent history before sending. We store the raw user input (without
+        // @file expansion) so recall surfaces what the user actually typed.
+        history.append(input);
+
         // First-time image attachment goes through harness.prompt_with_images directly; the
         // session_runner retry/rewind path doesn't need to participate for a one-shot
         // describe-this-image flow.
+        let spin = spinner::start("thinking");
         let prompt_fut = async {
             if has_images {
                 harness.prompt_with_images(expanded, pending_images).await
@@ -443,6 +454,7 @@ async fn run_repl(mut cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo)
             }
         };
 
+        spin.stop().await;
         if aborted.load(std::sync::atomic::Ordering::SeqCst) {
             tui.system_line("[aborted]");
         } else if let Err(e) = res {

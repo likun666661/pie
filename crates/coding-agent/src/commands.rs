@@ -76,6 +76,7 @@ impl Registry {
         r.register(Arc::new(SaveCommand));
         r.register(Arc::new(CompactCommand));
         r.register(Arc::new(UndoCommand));
+        r.register(Arc::new(BugReportCommand));
         r
     }
 
@@ -552,6 +553,53 @@ impl SlashCommand for UndoCommand {
                 CommandOutcome::Handled
             }
             Err(e) => CommandOutcome::Error(format!("undo failed: {e}")),
+        }
+    }
+}
+
+struct BugReportCommand;
+
+#[async_trait]
+impl SlashCommand for BugReportCommand {
+    fn name(&self) -> &'static str {
+        "bug-report"
+    }
+    fn description(&self) -> &'static str {
+        "write a redacted diagnostic dump for issue attachment"
+    }
+    async fn run(&self, _argv: &[String], ctx: &CommandCtx<'_>) -> CommandOutcome {
+        // Snapshot the model + thinking with the lock held briefly; the MutexGuard cannot
+        // cross an .await so we copy what we need and drop it.
+        let (model, thinking) = {
+            let state = ctx.harness.agent().state();
+            let m = state
+                .model
+                .as_ref()
+                .map(|m| format!("{}:{}", m.provider.0, m.id));
+            let t = state
+                .thinking_level
+                .map(|l| l.as_str())
+                .unwrap_or("?")
+                .to_string();
+            (m, t)
+        };
+        let cost = ctx.harness.cost();
+        let diag = crate::bug_report::DiagInputs {
+            session_id: ctx.session_id.to_string(),
+            model,
+            thinking,
+            tool_count: ctx.tool_count,
+            skill_count: ctx.harness.skills().len(),
+            cost_summary: pie_agent_core::cost_one_line_summary(&cost),
+            log_path: ctx.log_path.cloned(),
+        };
+        let dest = crate::bug_report::default_dest();
+        match crate::bug_report::build(diag, ctx.harness.session(), &dest).await {
+            Ok(path) => {
+                println!("wrote bug report: {}", path.display());
+                CommandOutcome::Handled
+            }
+            Err(e) => CommandOutcome::Error(format!("bug-report failed: {e}")),
         }
     }
 }

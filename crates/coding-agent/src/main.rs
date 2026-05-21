@@ -6,6 +6,7 @@
 //! Trimmed scope: no extensions, no themes, no print/rpc/json modes.
 
 mod agent_session;
+mod bug_report;
 mod commands;
 mod config;
 mod export;

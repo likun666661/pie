@@ -23,6 +23,9 @@ mod config;
 #[allow(dead_code)]
 #[path = "../src/export.rs"]
 mod export;
+#[allow(dead_code)]
+#[path = "../src/bug_report.rs"]
+mod bug_report;
 
 fn faux_model() -> pie_ai::Model {
     pie_ai::Model {

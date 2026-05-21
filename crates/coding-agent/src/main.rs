@@ -14,6 +14,7 @@ mod export;
 mod images;
 mod logging;
 mod lsp;
+mod lsp_supervisor;
 mod mcp_loader;
 mod mentions;
 mod model;
@@ -223,6 +224,13 @@ async fn run_repl(mut cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo)
     opts.prompt_templates = loaded_templates.templates.clone();
     opts.before_tool_call =
         Some(PermissionPolicy::default_for_coding_agent().as_before_tool_call());
+    // LSP feedback loop (issue #12): attach diagnostics to write/edit tool results when
+    // ~/.pie/lsp.toml or <cwd>/.pie/lsp.toml is configured.
+    let lsp_supervisor = std::sync::Arc::new(lsp_supervisor::LspSupervisor::load(&cwd).await);
+    let lsp_lang_count = lsp_supervisor.language_count();
+    if !lsp_supervisor.is_empty() {
+        opts.after_tool_call = Some(lsp_supervisor::as_after_tool_call(lsp_supervisor.clone()));
+    }
     let harness = std::sync::Arc::new(AgentHarness::new(opts));
     let session_runner =
         agent_session::AgentSession::new(harness.clone(), agent_session::RetrySettings::default());
@@ -270,6 +278,11 @@ async fn run_repl(mut cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo)
         tui.system_line(&format!(
             "mcp: connected to {} server(s), {mcp_tool_count} extra tool(s)",
             mcp.client_count,
+        ));
+    }
+    if lsp_lang_count > 0 {
+        tui.system_line(&format!(
+            "lsp: {lsp_lang_count} language(s) configured; diagnostics attach to edit/write results"
         ));
     }
     for diag in &mcp.diagnostics {

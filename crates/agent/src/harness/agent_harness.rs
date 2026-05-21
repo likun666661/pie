@@ -19,6 +19,10 @@ use pie_ai::{ImageContent, Message as PiMessage, Model};
 
 use super::super::agent::{Agent, AgentListener, AgentOptions, AgentRunError};
 use super::super::types::*;
+// AfterToolCallHook is re-exported under types::* via `pub use` in the module; if it isn't
+// directly visible here, fall back to the absolute path inside Agent::new.
+#[allow(unused_imports)]
+use crate::types::AfterToolCallHook;
 
 /// Harness-level lifecycle events. These are emitted in addition to the per-turn `AgentEvent`s
 /// the inner `Agent` already publishes — they cover the cross-turn lifecycle decisions the
@@ -80,6 +84,9 @@ pub struct AgentHarnessOptions {
     /// Optional `before_tool_call` hook. Wire a `PermissionPolicy::as_before_tool_call()` here
     /// to apply danger-detection to tool calls before the loop runs them.
     pub before_tool_call: Option<BeforeToolCallHook>,
+    /// Optional `after_tool_call` hook. Used by the LSP supervisor (issue #12) to attach
+    /// diagnostics to write/edit tool results.
+    pub after_tool_call: Option<AfterToolCallHook>,
     /// Per-session USD cap. When set, the harness refuses to start a new prompt once the
     /// running cost exceeds the cap. `None` disables the check.
     pub budget_cap_usd: Option<f64>,
@@ -98,6 +105,7 @@ impl AgentHarnessOptions {
             stream_fn: None,
             compaction: DEFAULT_COMPACTION_SETTINGS.clone(),
             before_tool_call: None,
+            after_tool_call: None,
             budget_cap_usd: None,
         }
     }
@@ -136,6 +144,7 @@ impl AgentHarness {
             initial_state: Some(state),
             stream_fn: options.stream_fn.clone(),
             before_tool_call: options.before_tool_call.clone(),
+            after_tool_call: options.after_tool_call.clone(),
             ..Default::default()
         });
 

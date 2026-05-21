@@ -4,8 +4,9 @@
 use std::sync::Arc;
 
 use pie_agent_core::{
-    AgentHarness, AgentHarnessOptions, AgentMessage, MemorySessionStorage, Session, SessionError,
-    SessionErrorCode, SessionStorage, SessionTreeEntry, Skill, StreamFn, ThinkingLevel,
+    AgentHarness, AgentHarnessOptions, AgentMessage, HarnessEvent, HarnessListener,
+    MemorySessionStorage, Session, SessionError, SessionErrorCode, SessionStorage,
+    SessionTreeEntry, Skill, StreamFn, ThinkingLevel,
 };
 use pie_ai::{
     AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream, AssistantRole,
@@ -305,4 +306,113 @@ async fn rehydrate_from_session_restores_messages_model_thinking() {
     // Model is restored only when the catalog has the (provider, id) pair. The faux model is
     // not in the catalog, so we just check the API didn't blow away the cold-start model.
     assert!(state.model.is_some());
+}
+
+/// Subscribing to the harness event bus must surface SessionStart on first prompt and Branch
+/// on move_to. SessionStart is exactly-once over the harness lifetime.
+#[tokio::test]
+async fn harness_event_bus_delivers_session_and_branch() {
+    use parking_lot::Mutex;
+
+    let storage = Arc::new(MemorySessionStorage::new());
+    let session = Session::new(storage as Arc<dyn SessionStorage>);
+
+    let mut opts = AgentHarnessOptions::new(faux_model(), session.clone());
+    opts.stream_fn = Some(faux_stream_fn("ack"));
+    let harness = AgentHarness::new(opts);
+
+    let received: Arc<Mutex<Vec<HarnessEvent>>> = Arc::new(Mutex::new(Vec::new()));
+    let r2 = received.clone();
+    let listener: HarnessListener = Arc::new(move |ev| {
+        r2.lock().push(ev);
+    });
+    let _unsub = harness.subscribe_harness(listener);
+
+    harness.prompt("hello").await.unwrap();
+    harness.move_to(None, None).await.unwrap();
+
+    let events = received.lock().clone();
+    let kinds: Vec<&'static str> = events
+        .iter()
+        .map(|e| match e {
+            HarnessEvent::SessionStart { .. } => "SessionStart",
+            HarnessEvent::Compaction { .. } => "Compaction",
+            HarnessEvent::Branch { .. } => "Branch",
+        })
+        .collect();
+    assert!(
+        kinds.contains(&"SessionStart"),
+        "expected SessionStart in {kinds:?}"
+    );
+    assert!(kinds.contains(&"Branch"), "expected Branch in {kinds:?}");
+
+    harness.prompt("again").await.unwrap();
+    let count_after = received
+        .lock()
+        .iter()
+        .filter(|e| matches!(e, HarnessEvent::SessionStart { .. }))
+        .count();
+    assert_eq!(
+        count_after, 1,
+        "SessionStart must be exactly-once over the lifetime of a harness"
+    );
+}
+
+/// A panicking listener does not poison the bus — other listeners still receive events.
+#[tokio::test]
+async fn harness_event_bus_isolates_panicking_listener() {
+    use parking_lot::Mutex;
+
+    let storage = Arc::new(MemorySessionStorage::new());
+    let session = Session::new(storage as Arc<dyn SessionStorage>);
+    let mut opts = AgentHarnessOptions::new(faux_model(), session);
+    opts.stream_fn = Some(faux_stream_fn("ack"));
+    let harness = AgentHarness::new(opts);
+
+    let received: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+    let r2 = received.clone();
+    let good: HarnessListener = Arc::new(move |_ev| {
+        *r2.lock() += 1;
+    });
+    let _unsub_good = harness.subscribe_harness(good);
+    let _unsub_bad = harness.subscribe_harness(Arc::new(|_ev| panic!("isolated")));
+
+    harness.prompt("hi").await.unwrap();
+    harness.move_to(None, None).await.unwrap();
+
+    assert!(
+        *received.lock() >= 2,
+        "good listener should still receive events past a panicking sibling"
+    );
+}
+
+/// `subscribe_harness` returns an unsubscriber; after dropping it, the listener stops receiving.
+#[tokio::test]
+async fn subscribe_harness_unsub_stops_delivery() {
+    use parking_lot::Mutex;
+
+    let storage = Arc::new(MemorySessionStorage::new());
+    let session = Session::new(storage as Arc<dyn SessionStorage>);
+    let mut opts = AgentHarnessOptions::new(faux_model(), session);
+    opts.stream_fn = Some(faux_stream_fn("ok"));
+    let harness = AgentHarness::new(opts);
+
+    let count: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+    let c2 = count.clone();
+    let listener: HarnessListener = Arc::new(move |_ev| {
+        *c2.lock() += 1;
+    });
+    let unsub = harness.subscribe_harness(listener);
+
+    harness.prompt("first").await.unwrap();
+    let before = *count.lock();
+    assert!(before > 0, "listener should have received SessionStart");
+
+    unsub();
+    harness.prompt("second").await.unwrap();
+    assert_eq!(
+        *count.lock(),
+        before,
+        "no events should reach the listener after unsubscribe"
+    );
 }

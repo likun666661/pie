@@ -20,6 +20,39 @@ use pie_ai::{ImageContent, Message as PiMessage, Model};
 use super::super::agent::{Agent, AgentListener, AgentOptions, AgentRunError};
 use super::super::types::*;
 
+/// Harness-level lifecycle events. These are emitted in addition to the per-turn `AgentEvent`s
+/// the inner `Agent` already publishes — they cover the cross-turn lifecycle decisions the
+/// harness is responsible for (compaction, branching, session boundaries).
+///
+/// Subscribers run synchronously in delivery order on the calling tokio task. Panicking
+/// subscribers are isolated via `catch_unwind` so one bad observer cannot break the harness;
+/// the offending listener is dropped from the registry.
+#[derive(Clone, Debug)]
+pub enum HarnessEvent {
+    /// First call to `prompt`/`continue_`/`prompt_from_template` after `AgentHarness::new`
+    /// fires this once. `messages_replayed` reflects how many session messages were already on
+    /// the active branch (e.g. a `--resume` start vs a fresh session).
+    SessionStart { messages_replayed: usize },
+    /// Auto- or manual compaction ran. `from_hook = true` means it was triggered by the
+    /// internal threshold check before a prompt; `false` means `force_compact` was called.
+    Compaction {
+        from_hook: bool,
+        summary: String,
+        tokens_before: u64,
+    },
+    /// A branch operation (`move_to` / `fork`) landed. `from_entry_id` is `None` for moves to
+    /// the root; `to_entry_id` is the new active leaf id (or `None` for root).
+    Branch {
+        from_entry_id: Option<String>,
+        to_entry_id: Option<String>,
+        summary_entry_id: Option<String>,
+    },
+}
+
+/// Listener for [`HarnessEvent`]. Shape mirrors `crate::agent::AgentListener` so the same Fn
+/// helpers translate.
+pub type HarnessListener = Arc<dyn Fn(HarnessEvent) + Send + Sync>;
+
 use super::compaction::compaction::{
     CompactionSettings, DEFAULT_COMPACTION_SETTINGS, SummarizeError, compact,
     estimate_context_tokens, should_compact,
@@ -70,6 +103,12 @@ pub struct AgentHarness {
     compaction_settings: Mutex<CompactionSettings>,
     /// Used by auto-compaction to call the LLM for summarization.
     stream_fn: Option<StreamFn>,
+    /// Harness-level lifecycle listeners. Separate from `Agent::listeners` — those cover
+    /// per-turn events; this covers cross-turn / session-level decisions. Held behind an
+    /// `Arc` so an unsubscriber closure can drop its captured handle independently of the
+    /// `AgentHarness` lifetime.
+    harness_listeners: Arc<Mutex<Vec<HarnessListener>>>,
+    session_start_emitted: Mutex<bool>,
 }
 
 impl AgentHarness {
@@ -94,7 +133,53 @@ impl AgentHarness {
             templates: Mutex::new(PromptTemplateRegistry::new(options.prompt_templates)),
             compaction_settings: Mutex::new(options.compaction),
             stream_fn: options.stream_fn,
+            harness_listeners: Arc::new(Mutex::new(Vec::new())),
+            session_start_emitted: Mutex::new(false),
         }
+    }
+
+    /// Register a harness-level lifecycle listener. Returns an unsubscriber closure.
+    ///
+    /// Listener panics are caught — see [`HarnessEvent`] for the isolation contract. The
+    /// returned closure removes the listener; calling it twice is a no-op.
+    pub fn subscribe_harness(&self, listener: HarnessListener) -> Box<dyn FnOnce() + Send> {
+        self.harness_listeners.lock().push(listener.clone());
+        // Identity-match the listener for removal. Capture the data-pointer address as a
+        // `usize` (Send) so the unsubscriber doesn't carry a raw pointer across threads.
+        let target = Arc::as_ptr(&listener) as *const () as usize;
+        let listeners = Arc::clone(&self.harness_listeners);
+        Box::new(move || {
+            let mut g = listeners.lock();
+            if let Some(i) = g
+                .iter()
+                .position(|l| (Arc::as_ptr(l) as *const () as usize) == target)
+            {
+                g.remove(i);
+            }
+        })
+    }
+
+    fn emit_harness_event(&self, event: HarnessEvent) {
+        let listeners = self.harness_listeners.lock().clone();
+        for l in listeners {
+            // Each listener runs isolated so one panic doesn't poison the rest.
+            let l = l.clone();
+            let ev = event.clone();
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || l(ev)));
+        }
+    }
+
+    fn ensure_session_start_emitted(&self) {
+        let mut g = self.session_start_emitted.lock();
+        if *g {
+            return;
+        }
+        *g = true;
+        let count = self.agent.state().messages.len();
+        drop(g);
+        self.emit_harness_event(HarnessEvent::SessionStart {
+            messages_replayed: count,
+        });
     }
 
     pub fn agent(&self) -> &Agent {
@@ -182,8 +267,14 @@ impl AgentHarness {
         entry_id: Option<&str>,
         summary: Option<BranchSummaryInput>,
     ) -> Result<Option<String>, super::types::SessionError> {
+        let from = self.session.leaf_id().await.ok().flatten();
         let result = self.session.move_to(entry_id, summary).await?;
         self.rehydrate_from_session().await?;
+        self.emit_harness_event(HarnessEvent::Branch {
+            from_entry_id: from,
+            to_entry_id: entry_id.map(|s| s.to_string()),
+            summary_entry_id: result.clone(),
+        });
         Ok(result)
     }
 
@@ -272,6 +363,7 @@ impl AgentHarness {
     }
 
     async fn prompt_with_message(&self, msg: AgentMessage) -> Result<(), AgentRunError> {
+        self.ensure_session_start_emitted();
         // Run compaction if we've crossed the threshold. This must happen before the user
         // message is appended so the cut point doesn't risk splitting the current turn.
         self.run_auto_compaction().await?;
@@ -284,6 +376,7 @@ impl AgentHarness {
     }
 
     pub async fn continue_(&self) -> Result<(), AgentRunError> {
+        self.ensure_session_start_emitted();
         self.run_auto_compaction().await?;
         let (listener, persist_errors) = make_session_listener(self.session.clone());
         let unsub = self.agent.subscribe(listener);
@@ -380,6 +473,12 @@ impl AgentHarness {
             )
             .await
             .map_err(|e| AgentRunError::Other(format!("session append compaction: {e}")))?;
+
+        self.emit_harness_event(HarnessEvent::Compaction {
+            from_hook,
+            summary: result.summary.clone(),
+            tokens_before: result.tokens_before,
+        });
 
         // Replace agent state's prefix with a single compaction-summary custom message. Keep
         // anything that came after the cut point.

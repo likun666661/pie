@@ -80,6 +80,9 @@ pub struct AgentHarnessOptions {
     /// Optional `before_tool_call` hook. Wire a `PermissionPolicy::as_before_tool_call()` here
     /// to apply danger-detection to tool calls before the loop runs them.
     pub before_tool_call: Option<BeforeToolCallHook>,
+    /// Per-session USD cap. When set, the harness refuses to start a new prompt once the
+    /// running cost exceeds the cap. `None` disables the check.
+    pub budget_cap_usd: Option<f64>,
 }
 
 impl AgentHarnessOptions {
@@ -95,6 +98,7 @@ impl AgentHarnessOptions {
             stream_fn: None,
             compaction: DEFAULT_COMPACTION_SETTINGS.clone(),
             before_tool_call: None,
+            budget_cap_usd: None,
         }
     }
 }
@@ -117,6 +121,7 @@ pub struct AgentHarness {
     /// Running token / cost totals for this harness lifetime. Updated automatically by an
     /// internal listener subscribed to `Agent::MessageEnd`. Snapshot via [`Self::cost`].
     cost: CostTracker,
+    budget_cap_usd: Option<f64>,
 }
 
 impl AgentHarness {
@@ -150,6 +155,7 @@ impl AgentHarness {
             harness_listeners: Arc::new(Mutex::new(Vec::new())),
             session_start_emitted: Mutex::new(false),
             cost,
+            budget_cap_usd: options.budget_cap_usd,
         }
     }
 
@@ -395,6 +401,14 @@ impl AgentHarness {
 
     async fn prompt_with_message(&self, msg: AgentMessage) -> Result<(), AgentRunError> {
         self.ensure_session_start_emitted();
+        if let Some(cap) = self.budget_cap_usd {
+            let total = self.cost.snapshot().tokens.cost.total;
+            if total >= cap {
+                return Err(AgentRunError::Other(format!(
+                    "budget cap reached: ${total:.4} >= ${cap:.4}. Reset with /cost reset or raise budget_cap_usd.",
+                )));
+            }
+        }
         // Run compaction if we've crossed the threshold. This must happen before the user
         // message is appended so the cut point doesn't risk splitting the current turn.
         self.run_auto_compaction().await?;

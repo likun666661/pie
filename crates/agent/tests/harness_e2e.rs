@@ -358,6 +358,80 @@ async fn harness_event_bus_delivers_session_and_branch() {
     );
 }
 
+/// Budget cap (issue #7): once the running cost crosses the configured USD cap, the next
+/// prompt is rejected with a clear error before any LLM call is dispatched.
+#[tokio::test]
+async fn budget_cap_blocks_new_prompts_after_cap_reached() {
+    use pie_ai::UsageCost;
+
+    let storage = Arc::new(MemorySessionStorage::new());
+    let session = Session::new(storage as Arc<dyn SessionStorage>);
+
+    // Deterministic usage that exceeds a $0.05 cap on the first turn.
+    let usage = Usage {
+        input: 10,
+        output: 5,
+        cache_read: 0,
+        cache_write: 0,
+        total_tokens: 15,
+        cost: UsageCost {
+            input: 0.04,
+            output: 0.02,
+            cache_read: 0.0,
+            cache_write: 0.0,
+            total: 0.06,
+        },
+    };
+    let stream: StreamFn = {
+        let usage = usage.clone();
+        Arc::new(move |_, _, _| {
+            let usage = usage.clone();
+            let (stream, mut sender) = AssistantMessageEventStream::new();
+            tokio::spawn(async move {
+                let msg = AssistantMessage {
+                    role: AssistantRole::Assistant,
+                    content: vec![ContentBlock::text("ok")],
+                    api: pie_ai::Api::from("faux"),
+                    provider: pie_ai::Provider::from("faux"),
+                    model: "faux".into(),
+                    response_model: None,
+                    response_id: None,
+                    diagnostics: None,
+                    usage,
+                    stop_reason: StopReason::Stop,
+                    error_message: None,
+                    timestamp: 0,
+                };
+                sender.push(AssistantMessageEvent::Start {
+                    partial: msg.clone(),
+                });
+                sender.push(AssistantMessageEvent::Done {
+                    reason: DoneReason::Stop,
+                    message: msg,
+                });
+            });
+            stream
+        })
+    };
+    let mut opts = AgentHarnessOptions::new(faux_model(), session);
+    opts.stream_fn = Some(stream);
+    opts.budget_cap_usd = Some(0.05);
+    let harness = AgentHarness::new(opts);
+
+    // First prompt succeeds; cost crosses the cap in this turn.
+    harness.prompt("one").await.unwrap();
+    let snap = harness.cost();
+    assert!(snap.tokens.cost.total >= 0.05, "cost should be >= cap");
+
+    // Second prompt is rejected at the gate, with a useful message.
+    let err = harness.prompt("two").await.unwrap_err().to_string();
+    assert!(err.contains("budget cap reached"), "{err}");
+
+    // Resetting the cost tracker unblocks the next prompt.
+    harness.reset_cost();
+    harness.prompt("three").await.unwrap();
+}
+
 /// Regression test for c4pt0r/pie#18. Prior behaviour: `Agent::abort()` cancelled the token
 /// but `agent_loop` only re-checked it after `stream.next()` returned, so an LLM stream that
 /// stalled mid-flight kept the prompt future blocked. The fix races `stream.next()` against

@@ -251,11 +251,21 @@ pub struct Skill {
 }
 
 /// Frontmatter shape parsed off the `SKILL.md` head.
+///
+/// `disable_model_invocation` is the canonical YAML key — matches the field name on `Skill`,
+/// the snake-case spelling used in issue #25 v3 documentation, and the error messages the
+/// `Skill` builtin tool emits when the flag is set. `disable-model-invocation` (kebab-case)
+/// is kept as a backward-compat alias for any existing SKILL.md files that used the older
+/// spelling. Both forms produce the same parsed value.
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct SkillFrontmatter {
     pub name: Option<String>,
     pub description: Option<String>,
-    #[serde(default, rename = "disable-model-invocation")]
+    #[serde(
+        default,
+        rename = "disable_model_invocation",
+        alias = "disable-model-invocation"
+    )]
     pub disable_model_invocation: bool,
 }
 

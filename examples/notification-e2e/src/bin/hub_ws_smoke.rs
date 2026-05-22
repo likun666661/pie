@@ -172,8 +172,10 @@ async fn recv_text_with_timeout(ws: &mut WebSocketStream<TcpStream>) -> Result<S
         .context("timeout")?
 }
 
-/// Outbound client. Connects, sends hello (with redacted token), reads trigger frames, runs
-/// dedup, and produces `DemoTrigger`s.
+/// Outbound client. Connects, sends a hello frame carrying an opaque fake bearer token (the
+/// wire intentionally carries the token bytes; only observable output — stdout/stderr/the
+/// serialized envelope — must not contain them, which is asserted at the end of `main`),
+/// reads trigger frames, runs dedup, and produces `DemoTrigger`s.
 async fn run_client(url: String, sink_capacity: usize) -> Result<DedupSink> {
     let (mut ws, _) = connect_async(&url).await.context("connect")?;
     let hello = serde_json::json!({

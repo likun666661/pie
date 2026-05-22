@@ -61,7 +61,7 @@ Inside `pie`, slash commands control the session:
 |---------|--------------|
 | `/help` | Show all commands |
 | `/model [provider:model-id]` | Show or switch model |
-| `/thinking [off|minimal|low|medium|high|xhigh]` | Show or set thinking level |
+| `/thinking` | Show or set thinking level, off, minimal, low, medium, high, xhigh |
 | `/sessions` | List sessions for the current project |
 | `/save [path]` | Export the transcript to Markdown |
 | `/compact [instructions]` | Compact long context |

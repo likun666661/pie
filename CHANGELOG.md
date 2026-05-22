@@ -161,6 +161,25 @@ versions sync across all workspace crates per the lockstep policy in `AGENTS.md`
   and (b) a degraded hook reporting `HookState::Disconnected` to verify
   `notification_status_snapshot` surfaces the hook's reported state and
   `requires_attention` message without producing any triggers.
+- **#20 (trigger permission hook)** New `AgentHarnessOptions::before_trigger:
+  Option<BeforeTriggerHook>` plugs a permission decision between dedup/cycle evaluator
+  Accept and audit persistence. The hook returns `BeforeTriggerDecision::Allow` (keeps
+  state `Accepted`, default if no hook configured), `Deny { reason }` (transitions to
+  terminal `PermissionDenied`, reason captured in `evaluator_decision`), or `Prompt
+  { reason }` (transitions to soft-terminal `NeedsApproval` for future UI replay).
+  Hook only runs on the Accept path — `Deduped` / `CycleSuppressed` outcomes skip it
+  entirely, since dedup/cycle decisions are pure-runtime concerns with no policy
+  involvement. The hook receives `BeforeTriggerContext { trigger, runtime }` so policy
+  can reason over the full trigger envelope (authority / source / payload summary)
+  plus a live `TriggerRuntimeSnapshot` (e.g. for burst-rate rules). `reason` strings
+  appear in audit + observability surfaces and must not carry secrets — Provider/Auth
+  reviewed the boundary. The deny/prompt reason is also surfaced on
+  `HarnessEvent::TriggerHandled.evaluator_decision` (new field; mirrors the audit
+  record's `evaluator_decision`) so live subscribers (TUI banner, JSONL logs) can
+  render why a trigger was denied/needs approval without a secondary session lookup.
+  4 new integration tests pin default-Allow, Deny→PermissionDenied (asserting both the
+  audit record AND the event carry the reason), Prompt→NeedsApproval (same dual
+  assertion), and that the hook is bypassed on the Deduped path.
 
 ### Fixed
 

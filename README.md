@@ -29,6 +29,70 @@ You can also store a key from inside `pie`:
 /login anthropic sk-ant-...
 ```
 
+### Local OpenAI-compatible models
+
+`pie` can also use local OpenAI-compatible servers. Add a model definition to
+`~/.pie/models.json` (user-global) or `<project>/.pie/models.json` (project-local, higher
+precedence), then select it with `--provider` and `--model`.
+
+Example for [DS4](https://github.com/antirez/ds4), the DeepSeek V4 Flash local
+server. The Responses endpoint is the preferred OpenAI-compatible API for
+Codex-style clients; chat completions also works for simpler integrations.
+
+```bash
+# In the DS4 checkout:
+./ds4-server --ctx 100000 --kv-disk-dir /tmp/ds4-kv --kv-disk-space-mb 8192
+# If launching from another directory, add: --chdir /path/to/ds4
+```
+
+```json
+{
+  "models": [
+    {
+      "id": "deepseek-v4-flash",
+      "name": "DeepSeek V4 Flash (local DS4)",
+      "api": "openai-responses",
+      "provider": "ds4",
+      "baseUrl": "http://127.0.0.1:8000/v1",
+      "reasoning": true,
+      "thinkingLevelMap": {
+        "off": null,
+        "minimal": "low",
+        "low": "low",
+        "medium": "medium",
+        "high": "high",
+        "xhigh": "xhigh"
+      },
+      "input": ["text"],
+      "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+      "contextWindow": 100000,
+      "maxTokens": 384000,
+      "compat": {
+        "supportsStore": false,
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": true,
+        "supportsUsageInStreaming": true,
+        "maxTokensField": "max_tokens",
+        "supportsStrictMode": false,
+        "thinkingFormat": "deepseek",
+        "requiresReasoningContentOnAssistantMessages": true
+      }
+    }
+  ]
+}
+```
+
+Then run:
+
+```bash
+export DS4_API_KEY=dsv4-local
+./target/release/pie --provider ds4 --model deepseek-v4-flash
+```
+
+DS4 is local and accepts placeholder bearer tokens. You can also store the same
+local placeholder with `/login ds4 dsv4-local`. Using the `ds4` provider keeps
+local model credentials separate from real `OPENAI_API_KEY` credentials.
+
 ## Quick start
 
 ```bash
@@ -103,6 +167,7 @@ By default, `pie` stores local state under `~/.pie`:
 | `~/.pie/sessions/<cwd-hash>/<uuidv7>.jsonl` | Session history for each project |
 | `~/.pie/memory/*.md` | Cross-session memory injected into future sessions |
 | `~/.pie/auth.json` | Stored API keys from `/login` |
+| `~/.pie/models.json` | User-global local/custom model definitions |
 | `~/.pie/history` | Prompt history |
 | `~/.pie/hooks.toml` | Optional command/webhook hooks |
 

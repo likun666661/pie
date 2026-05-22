@@ -1,6 +1,6 @@
 //! Persistent credential store for `pie`. Foundation for c4pt0r/pie#13: stores per-provider
 //! credentials at `~/.pie/auth.json` with mode 0600. /login + /logout populate it;
-//! resolve_for_provider plumbs into the model resolver as an env-var fallback.
+//! resolve_for_provider plumbs into model auto-detection and the CLI stream wrapper.
 //!
 //! Resolution precedence (in `resolve_for_provider`):
 //!   1. The provider's environment variable, if set and non-empty.
@@ -124,11 +124,7 @@ impl AuthStore {
     }
 
     /// Resolve a credential for `provider`. Env var wins; auth.json is the fallback. Returns
-    /// the bare API-key string for `api_key` and the access token for `oauth`. Plumbed in by
-    /// the provider clients via env-resolver; the binary's `model::auto_detect_model` already
-    /// checks both env and `store.get`, so this helper exists for future code paths that
-    /// don't have access to the model auto-detector.
-    #[allow(dead_code)]
+    /// the bare API-key string for `api_key` and the access token for `oauth`.
     pub fn resolve_for_provider(&self, provider: &str) -> Option<String> {
         let env_var = match provider {
             "anthropic" => "ANTHROPIC_API_KEY",
@@ -137,6 +133,7 @@ impl AuthStore {
             "groq" => "GROQ_API_KEY",
             "mistral" => "MISTRAL_API_KEY",
             "google" => "GEMINI_API_KEY",
+            "ds4" => "DS4_API_KEY",
             _ => "",
         };
         if !env_var.is_empty() {

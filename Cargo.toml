@@ -5,9 +5,11 @@ members = [
     "crates/agent",
     "crates/coding-agent",
     "crates/mcp",
+    "examples/notification-e2e",
 ]
 
-# Default-members for `cargo build --workspace` style invocations — keep the same as members.
+# Default-members for `cargo build --workspace` style invocations — keep the same as members
+# minus example crates (examples build/test on demand, not on every workspace build).
 default-members = [
     "crates/ai",
     "crates/agent",

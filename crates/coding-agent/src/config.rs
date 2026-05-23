@@ -3,6 +3,7 @@
 
 use std::path::PathBuf;
 
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 /// Base directory: `${PIE_DIR:-$HOME/.pie}`.
@@ -34,4 +35,61 @@ pub fn cwd_hash(cwd: &std::path::Path) -> String {
     h.update(cwd.to_string_lossy().as_bytes());
     let digest = h.finalize();
     hex::encode(&digest[..6]) // 12 chars; plenty for low-collision per-cwd buckets
+}
+
+/// Parse the `[triggers] poll_interval_secs = N` setting from `config.toml`.
+///
+/// Unknown sections and keys are ignored so feature-specific readers can coexist while the
+/// config surface is still small.
+pub fn parse_trigger_poll_interval_secs(toml_text: &str) -> Result<Option<u64>, String> {
+    let parsed: ConfigFile =
+        toml::from_str(toml_text).map_err(|e| format!("parse config.toml: {e}"))?;
+    let Some(secs) = parsed
+        .triggers
+        .and_then(|section| section.poll_interval_secs)
+    else {
+        return Ok(None);
+    };
+    if secs == 0 {
+        return Err("`[triggers] poll_interval_secs` must be at least 1".into());
+    }
+    Ok(Some(secs))
+}
+
+#[derive(Debug, Deserialize)]
+struct ConfigFile {
+    triggers: Option<TriggerConfigSection>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TriggerConfigSection {
+    poll_interval_secs: Option<u64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_trigger_poll_interval_reads_config_value() {
+        let text = r#"
+[triggers]
+poll_interval_secs = 15
+"#;
+        assert_eq!(parse_trigger_poll_interval_secs(text).unwrap(), Some(15));
+    }
+
+    #[test]
+    fn parse_trigger_poll_interval_defaults_when_missing() {
+        assert_eq!(parse_trigger_poll_interval_secs("").unwrap(), None);
+    }
+
+    #[test]
+    fn parse_trigger_poll_interval_rejects_zero() {
+        let text = r#"
+[triggers]
+poll_interval_secs = 0
+"#;
+        assert!(parse_trigger_poll_interval_secs(text).is_err());
+    }
 }

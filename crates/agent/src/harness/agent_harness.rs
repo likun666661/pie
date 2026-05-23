@@ -111,6 +111,8 @@ pub enum HarnessEvent {
     /// always precedes `TriggerExecutionStarted` for the same `trace_id`.
     TriggerExecutionStarted {
         trace_id: String,
+        source_label: String,
+        event_label: String,
         prompt_preview: String,
     },
     /// A sub-agent execution finished successfully and the parent `trigger_result` audit
@@ -234,7 +236,7 @@ pub type BeforeTriggerHook = Arc<
 >;
 
 /// Aggregated, copy-friendly snapshot returned by
-/// [`AgentHarness::notification_status_snapshot`]. The TUI / `/triggers hooks` command
+/// [`AgentHarness::notification_status_snapshot`]. The TUI / `/triggers sources` command
 /// renders this directly; `hooks` and `running` are snapshots, not live views, so the caller
 /// cannot pin the underlying registries against concurrent registrations / completions.
 ///
@@ -271,10 +273,8 @@ pub struct RunningTriggerState {
 /// `TriggerAction { prompt: format!("{source_label} fired: {event_label}"),
 /// promote: PromoteAction::None, promote_requires_approval: false }`.
 ///
-/// `promote` and `promote_requires_approval` are accepted in this sub-PR but only the
-/// `PromoteAction::None` variant has an effect; the promotion pipeline lands in sub-PR 5b
-/// per the issue #20 amendment. Fields are reserved here so adapters can be written against
-/// the final shape today.
+/// `promote` controls whether the completed trigger result is only audited or also injected
+/// into the parent session and parent agent context.
 #[derive(Clone, Debug)]
 pub struct TriggerAction {
     pub prompt: String,
@@ -295,9 +295,12 @@ impl TriggerAction {
     }
 }
 
-/// How a completed sub-agent's `trigger_result` should affect the parent session. v1 ships
-/// `None` (no-op) and `PromoteSummaryNow` (templated insertion); `InjectNextTurn` per the
-/// issue #20 amendment is deferred to sub-PR 6 / RFC 4 work.
+/// How a completed sub-agent's `trigger_result` should affect the parent session. `None`
+/// leaves the result in audit/TUI only. `PromoteSummaryNow` inserts a templated result into
+/// the parent session immediately. `PromoteSummaryWhenSummaryContains` is the dynamic-rule
+/// path: it promotes only when the sub-agent summary identifies one of the rule ids that
+/// explicitly requested chat promotion. `InjectNextTurn` per the issue #20 amendment is
+/// deferred to sub-PR 6 / RFC 4 work.
 #[derive(Clone, Debug, Default)]
 pub enum PromoteAction {
     #[default]
@@ -310,6 +313,10 @@ pub enum PromoteAction {
         /// never persisted as `template_name` because the audit contract reserves
         /// `template_name` for a registry-style identity, not the body content.
         template_body: Option<String>,
+    },
+    PromoteSummaryWhenSummaryContains {
+        template_body: Option<String>,
+        required_substrings: Vec<String>,
     },
 }
 
@@ -700,6 +707,7 @@ impl AgentHarness {
         let event_label = trigger.event_label.clone();
         let listeners = Arc::clone(&self.harness_listeners);
         let parent_session = self.session.clone();
+        let parent_agent = Arc::clone(&self.agent);
         let running_registry = Arc::clone(&self.running_triggers);
         let action_hook = self.before_trigger_action.clone();
         let runtime_snapshot = self.trigger_runtime.snapshot();
@@ -720,6 +728,7 @@ impl AgentHarness {
                 event_label,
                 listeners,
                 parent_session,
+                parent_agent,
                 running_registry,
                 action_hook,
                 runtime_snapshot,
@@ -1292,7 +1301,9 @@ fn emit_from_listeners(listeners: &Arc<Mutex<Vec<HarnessListener>>>, event: Harn
 /// 1. Resolve the `TriggerAction` via `before_trigger_action` hook (or default).
 /// 2. Register the trigger as in-flight (`running_triggers`) + emit
 ///    `TriggerExecutionStarted`.
-/// 3. Build the sub-agent's `Agent` on an in-memory session, inheriting parent context.
+/// 3. Build the sub-agent's `Agent` on an in-memory session, inheriting the parent model,
+///    system prompt, tools, thinking level, and tool hooks. It does not inherit the parent
+///    conversation messages unless a later promotion writes trigger output back.
 /// 4. Race `agent.prompt(action.prompt)` against the cancel token via `tokio::select!`.
 /// 5. Compute `(success, summary, cost_usd)` from the agent's final state.
 /// 6. Write the `trigger_result` audit entry to the **parent** session.
@@ -1306,6 +1317,7 @@ async fn run_trigger_action(
     event_label: String,
     listeners: Arc<Mutex<Vec<HarnessListener>>>,
     parent_session: Session,
+    parent_agent: Arc<Agent>,
     running_registry: Arc<Mutex<std::collections::HashMap<String, RunningTriggerHandle>>>,
     action_hook: Option<BeforeTriggerActionHook>,
     runtime_snapshot: super::trigger_runtime::TriggerRuntimeSnapshot,
@@ -1356,15 +1368,19 @@ async fn run_trigger_action(
         &listeners,
         HarnessEvent::TriggerExecutionStarted {
             trace_id: trace_id.clone(),
+            source_label: source_label.clone(),
+            event_label: event_label.clone(),
             prompt_preview,
         },
     );
 
-    // 3. Build sub-agent. In sub-PR 5a we use MemorySessionStorage; the sub-agent's
-    // transcript lives in memory only and is discarded when this task finishes. Per the
-    // issue #20 amendment, jsonl-backed retained branches land in sub-PR 5c. The
-    // `trigger_result.summary` we persist to the parent session is the only durable
-    // record of what the sub-agent produced in 5a.
+    // 3. Build sub-agent. It receives the parent's already-rendered system prompt, tool
+    // list, and hooks. That means model-facing skill catalog text and the live Skill tool
+    // remain available to trigger actions, but parent conversation messages are not copied
+    // into the trigger run. In sub-PR 5a the sub-agent transcript lives in memory only and
+    // is discarded when this task finishes. Per the issue #20 amendment, jsonl-backed
+    // retained branches land in sub-PR 5c. The `trigger_result.summary` we persist to the
+    // parent session is the only durable record of what the sub-agent produced in 5a.
     let sub_storage: Arc<dyn super::session::session::SessionStorage> =
         Arc::new(super::session::memory_storage::MemorySessionStorage::new());
     let sub_session = super::session::session::Session::new(sub_storage);
@@ -1514,6 +1530,7 @@ async fn run_trigger_action(
     apply_promotion(
         &listeners,
         &parent_session,
+        &parent_agent,
         &trace_id,
         &trigger,
         success,
@@ -1744,6 +1761,7 @@ fn truncate_on_char_boundary(body: String, cap_bytes: usize) -> (String, bool) {
 async fn apply_promotion(
     listeners: &Arc<Mutex<Vec<HarnessListener>>>,
     parent_session: &Session,
+    parent_agent: &Arc<Agent>,
     trace_id: &str,
     trigger: &Trigger,
     success: bool,
@@ -1753,12 +1771,28 @@ async fn apply_promotion(
     promote: &PromoteAction,
     require_approval: bool,
 ) {
+    if summary.as_deref().map(str::trim) == Some("no dynamic trigger rule matched") {
+        return;
+    }
     // Extract the inline template body (if any). v1 does not look up named templates from
     // any registry; that lands in sub-PR 6 / RFC 4 rule engine work. The body is what we
     // render against — never persisted as `template_name` in the audit.
     let template_body_arg: Option<String> = match promote {
         PromoteAction::None => return, // most common path; nothing else to do
         PromoteAction::PromoteSummaryNow { template_body } => template_body.clone(),
+        PromoteAction::PromoteSummaryWhenSummaryContains {
+            template_body,
+            required_substrings,
+        } => {
+            let summary_text = summary.as_deref().unwrap_or_default();
+            if !required_substrings
+                .iter()
+                .any(|needle| summary_text.contains(needle))
+            {
+                return;
+            }
+            template_body.clone()
+        }
     };
     let promote_kind = "promote_summary_now";
 
@@ -1906,7 +1940,7 @@ async fn apply_promotion(
         content: pie_ai::UserContent::Text(final_body),
         timestamp: chrono::Utc::now().timestamp_millis(),
     }));
-    let inserted_entry_id = match parent_session.append_message(user_message).await {
+    let inserted_entry_id = match parent_session.append_message(user_message.clone()).await {
         Ok(id) => id,
         Err(e) => {
             emit_from_listeners(
@@ -1935,6 +1969,7 @@ async fn apply_promotion(
             return;
         }
     };
+    parent_agent.state().messages.push(user_message);
 
     let audit_data = serde_json::json!({
         "state": "success",

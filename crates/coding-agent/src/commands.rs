@@ -99,6 +99,7 @@ impl Registry {
         r.register(Arc::new(FindCommand));
         r.register(Arc::new(HistoryCommand));
         r.register(Arc::new(TriggersCommand));
+        r.register(Arc::new(NewTriggerCommand));
         r
     }
 
@@ -1045,10 +1046,10 @@ impl SlashCommand for TriggersCommand {
         "triggers"
     }
     fn description(&self) -> &'static str {
-        "show trigger hooks, running actions, and recent audit"
+        "show trigger sources, rules, running actions, and recent audit"
     }
     fn usage(&self) -> &'static str {
-        "[status|hooks|running|audit [N]|abort <trace_id>|abort --all]"
+        "[status|rules|sources|enable <id>|disable <id>|remove <id>|remove --all|running|audit [N]|abort <trace_id>|abort --all]"
     }
     async fn run(&self, argv: &[String], ctx: &CommandCtx<'_>) -> CommandOutcome {
         let subcommand = argv.first().map(String::as_str).unwrap_or("status");
@@ -1060,9 +1061,45 @@ impl SlashCommand for TriggersCommand {
                 }
                 CommandOutcome::Handled
             }
-            "hooks" => {
+            "rules" => {
+                let rules = crate::triggers::global_registry().list();
+                for line in render_dynamic_trigger_rules(&rules, usize::MAX) {
+                    println!("{line}");
+                }
+                CommandOutcome::Handled
+            }
+            "remove" | "rm" | "delete" => {
+                let Some(target) = argv.get(1) else {
+                    return CommandOutcome::Error("usage: /triggers remove <id>|--all".into());
+                };
+                if target == "--all" {
+                    match crate::triggers::global_registry().clear_rules() {
+                        Ok(count) => {
+                            println!("removed {count} dynamic trigger rule(s)");
+                            CommandOutcome::Handled
+                        }
+                        Err(e) => CommandOutcome::Error(e.to_string()),
+                    }
+                } else {
+                    match crate::triggers::global_registry().remove_rule(target) {
+                        Ok(Some(rule)) => {
+                            println!("removed trigger {}", rule.id);
+                            println!("  condition: {}", rule.condition);
+                            println!("  action: {}", rule.action);
+                            CommandOutcome::Handled
+                        }
+                        Ok(None) => CommandOutcome::Error(format!(
+                            "no dynamic trigger rule with id '{target}'"
+                        )),
+                        Err(e) => CommandOutcome::Error(e.to_string()),
+                    }
+                }
+            }
+            "enable" | "resume" => set_dynamic_trigger_enabled(argv.get(1), true),
+            "disable" | "pause" => set_dynamic_trigger_enabled(argv.get(1), false),
+            "sources" | "hooks" => {
                 let snapshot = ctx.harness.notification_status_snapshot();
-                for line in render_trigger_hooks(&snapshot.hooks) {
+                for line in render_trigger_sources(&snapshot.hooks) {
                     println!("{line}");
                 }
                 CommandOutcome::Handled
@@ -1114,17 +1151,95 @@ impl SlashCommand for TriggersCommand {
     }
 }
 
-fn render_triggers_status(snapshot: &NotificationStatusSnapshot) -> Vec<String> {
+struct NewTriggerCommand;
+
+#[async_trait]
+impl SlashCommand for NewTriggerCommand {
+    fn name(&self) -> &'static str {
+        "new-trigger"
+    }
+
+    fn description(&self) -> &'static str {
+        "create a dynamic natural-language trigger rule"
+    }
+
+    fn usage(&self) -> &'static str {
+        "<natural-language trigger request>"
+    }
+
+    async fn run(&self, argv: &[String], ctx: &CommandCtx<'_>) -> CommandOutcome {
+        let spec = argv.join(" ");
+        if spec.trim().is_empty() {
+            return CommandOutcome::Error(
+                "usage: /new-trigger <natural-language trigger request>".into(),
+            );
+        }
+
+        let prompt = format!(
+            "The user asked pie to create a dynamic trigger. Extract the trigger condition and action from the request, then call NewTrigger with structured condition and action fields. Dynamic triggers fire once by default; set fire_once=false only when the user explicitly asks for a repeating trigger. Trigger output is shown in the TUI and audit by default; set promote_to_chat=true only when the user explicitly asks for trigger results to enter the main chat context or be visible to future turns. Do not require a fixed syntax. If either the condition or action is missing, ask one concise clarification question instead of calling tools.\n\nUser request:\n{spec}"
+        );
+        match ctx.harness.prompt(prompt).await {
+            Ok(()) => CommandOutcome::Handled,
+            Err(e) => CommandOutcome::Error(format!("create trigger: {e}")),
+        }
+    }
+}
+
+pub(crate) fn render_triggers_status(snapshot: &NotificationStatusSnapshot) -> Vec<String> {
     let mut lines = Vec::new();
     let runtime = snapshot.runtime;
+    let dynamic_rules = crate::triggers::global_registry().list();
+    let enabled_count = dynamic_rules.iter().filter(|rule| rule.enabled).count();
+    let disabled_count = dynamic_rules.len().saturating_sub(enabled_count);
+    let fire_once_count = dynamic_rules.iter().filter(|rule| rule.fire_once).count();
+    let repeat_count = dynamic_rules.len().saturating_sub(fire_once_count);
+    let promote_count = dynamic_rules
+        .iter()
+        .filter(|rule| rule.promote_to_chat)
+        .count();
     lines.push("Trigger status:".into());
     lines.push(format!(
-        "  runtime: accepted={} deduped={} cycle_suppressed={} active_traces={} dedup_entries={}",
+        "  dynamic rules: {} total, {} enabled, {} disabled ({} fire_once, {} repeat, {} promote_to_chat)",
+        dynamic_rules.len(),
+        enabled_count,
+        disabled_count,
+        fire_once_count,
+        repeat_count,
+        promote_count
+    ));
+    let dynamic_checker_count = snapshot
+        .hooks
+        .iter()
+        .filter(|hook| {
+            hook.subscription_labels
+                .iter()
+                .any(|label| label.contains("dynamic trigger periodic check"))
+        })
+        .count();
+    let notification_hook_count = snapshot.hooks.len().saturating_sub(dynamic_checker_count);
+    lines.push(format!(
+        "  local dynamic checker: {} registered, polls every {}s while enabled rules exist",
+        dynamic_checker_count,
+        crate::triggers::dynamic::dynamic_trigger_poll_interval_secs()
+    ));
+    lines.push(format!(
+        "  push trigger sources: {} configured source(s) feed server-pushed events into the same trigger runtime",
+        notification_hook_count
+    ));
+    let storage = crate::triggers::global_registry()
+        .storage_path()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "memory".into());
+    lines.push(format!("  storage: {storage}"));
+    lines.push("  output: default is TUI + audit only; rules marked promote_to_chat also enter the main chat context".into());
+    lines.push(format!(
+        "  engine: accepted={} deduped={} cycle_suppressed={} recent_traces={} dedup_entries={} running={}",
         runtime.accepted_total,
         runtime.deduped_total,
         runtime.cycle_suppressed_total,
         runtime.active_traces,
-        runtime.dedup_entries
+        runtime.dedup_entries,
+        snapshot.running.len()
     ));
     let attention_count = snapshot
         .hooks
@@ -1137,21 +1252,88 @@ fn render_triggers_status(snapshot: &NotificationStatusSnapshot) -> Vec<String> 
         .filter(|h| matches!(h.state, HookState::Connected))
         .count();
     lines.push(format!(
-        "  hooks: {} total, {} connected, {} require attention",
+        "  sources: {} total, {} connected, {} require attention",
         snapshot.hooks.len(),
         connected_count,
         attention_count
     ));
-    lines.push(format!("  running: {}", snapshot.running.len()));
-    lines.push("  details: /triggers hooks | /triggers running | /triggers audit".into());
+    lines.extend(
+        render_dynamic_trigger_rules(&dynamic_rules, 3)
+            .into_iter()
+            .skip(1),
+    );
+    lines.push(
+        "  commands: /triggers rules | /triggers sources | /triggers disable <id> | /triggers enable <id> | /triggers remove <id> | /triggers audit".into(),
+    );
     lines
 }
 
-fn render_trigger_hooks(hooks: &[NotificationHookStatus]) -> Vec<String> {
-    if hooks.is_empty() {
-        return vec!["(no trigger hooks registered)".into()];
+fn set_dynamic_trigger_enabled(target: Option<&String>, enabled: bool) -> CommandOutcome {
+    let Some(id) = target else {
+        let action = if enabled { "enable" } else { "disable" };
+        return CommandOutcome::Error(format!("usage: /triggers {action} <id>"));
+    };
+    match crate::triggers::global_registry().set_rule_enabled(id, enabled) {
+        Ok(Some(rule)) => {
+            let state = if rule.enabled { "enabled" } else { "disabled" };
+            println!("{state} trigger {}", rule.id);
+            println!("  condition: {}", rule.condition);
+            println!("  action: {}", rule.action);
+            if rule.enabled && rule.fire_once {
+                println!("  fire_once: true (will disable again after the next successful match)");
+            }
+            CommandOutcome::Handled
+        }
+        Ok(None) => CommandOutcome::Error(format!("no dynamic trigger rule with id '{id}'")),
+        Err(e) => CommandOutcome::Error(e.to_string()),
     }
-    let mut lines = vec![format!("Trigger hooks ({}):", hooks.len())];
+}
+
+pub(crate) fn render_dynamic_trigger_rules(
+    rules: &[crate::triggers::dynamic::DynamicTriggerRule],
+    limit: usize,
+) -> Vec<String> {
+    if rules.is_empty() {
+        return vec!["Dynamic trigger rules: none".into()];
+    }
+    let shown = rules.len().min(limit);
+    let mut lines = vec![format!("Dynamic trigger rules ({}):", rules.len())];
+    for rule in rules.iter().take(shown) {
+        let state = if rule.enabled { "enabled" } else { "disabled" };
+        let fire_mode = if rule.fire_once {
+            "fire_once"
+        } else {
+            "repeat"
+        };
+        let output_mode = if rule.promote_to_chat {
+            "promote_to_chat"
+        } else {
+            "audit_only"
+        };
+        lines.push(format!(
+            "  - {} [{state}, {fire_mode}, {output_mode}{}] when {} -> {}",
+            rule.id,
+            rule.fired_at
+                .map(|at| format!(", fired_at={}", at.to_rfc3339()))
+                .unwrap_or_default(),
+            preview_text(&rule.condition, 80),
+            preview_text(&rule.action, 80)
+        ));
+    }
+    if shown < rules.len() {
+        lines.push(format!(
+            "  ... {} more; run /triggers rules",
+            rules.len() - shown
+        ));
+    }
+    lines
+}
+
+fn render_trigger_sources(hooks: &[NotificationHookStatus]) -> Vec<String> {
+    if hooks.is_empty() {
+        return vec!["(no trigger sources registered)".into()];
+    }
+    let mut lines = vec![format!("Trigger sources ({}):", hooks.len())];
     for (idx, hook) in hooks.iter().enumerate() {
         let labels = if hook.subscription_labels.is_empty() {
             "subscriptions: none".into()
@@ -1159,7 +1341,7 @@ fn render_trigger_hooks(hooks: &[NotificationHookStatus]) -> Vec<String> {
             format!("subscriptions: {}", hook.subscription_labels.join(", "))
         };
         lines.push(format!(
-            "  - hook #{}: {} queued={} dropped={} deduped={} last_event={}{}",
+            "  - source #{}: {} queued={} dropped={} deduped={} last_event={}{}",
             idx + 1,
             render_hook_state(&hook.state),
             hook.queued_count,
@@ -1483,15 +1665,17 @@ mod tests {
 
         let status = render_triggers_status(&snapshot).join("\n");
         assert!(status.contains("accepted=7"));
+        assert!(status.contains("recent_traces=6"));
         assert!(status.contains("1 total"));
         assert!(status.contains("1 require attention"));
-        assert!(status.contains("running: 1"));
+        assert!(status.contains("running=1"));
+        assert!(status.contains("push trigger sources: 1 configured source"));
 
-        let hooks = render_trigger_hooks(&snapshot.hooks).join("\n");
-        assert!(hooks.contains("disconnected (protocol_mismatch)"));
-        assert!(hooks.contains("queued=2"));
-        assert!(hooks.contains("subscriptions: repo c4pt0r/pie"));
-        assert!(hooks.contains("attention: upgrade hub"));
+        let sources = render_trigger_sources(&snapshot.hooks).join("\n");
+        assert!(sources.contains("disconnected (protocol_mismatch)"));
+        assert!(sources.contains("queued=2"));
+        assert!(sources.contains("subscriptions: repo c4pt0r/pie"));
+        assert!(sources.contains("attention: upgrade hub"));
 
         let running = render_running_triggers(&snapshot.running).join("\n");
         assert!(running.contains("trace-1"));

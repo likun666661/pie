@@ -115,6 +115,7 @@ Once the REPL opens, type a request such as:
 summarize this repository
 fix the failing tests
 add a README example and run the relevant checks
+when ~/build.done appears, run cargo test and show me the result
 ```
 
 ## Useful commands
@@ -133,6 +134,10 @@ Inside `pie`, slash commands control the session:
 | `/cost` | Show token and cost totals |
 | `/login <provider> <api-key>` | Store an API key |
 | `/logout <provider>` | Remove a stored API key |
+| `/triggers` | Show trigger rules, sources, running actions, and audit |
+| `/triggers rules` | List dynamic trigger ids and state |
+| `/triggers enable <id>` / `/triggers disable <id>` | Resume or pause a trigger |
+| `/triggers remove <id>` | Delete a trigger |
 | `/quit` | Exit |
 
 CLI helpers:
@@ -156,7 +161,47 @@ The agent has tools for common coding workflows:
 - delegate focused sub-tasks
 - resume JSONL-backed sessions per project
 - attach images to the first prompt with `--image`
+- create session-scoped natural-language triggers that run actions when local checks or MCP
+  push events match
 - run local command hooks or HTTP webhooks on agent lifecycle events; see [docs/hooks.md](docs/hooks.md)
+
+## Triggers
+
+Triggers let you describe an automation in normal chat:
+
+```text
+when $HOME/helloworld exists, print its contents
+```
+
+`pie` turns that request into a dynamic trigger rule. Rules are stored next to the active
+session, so a new session starts cleanly and `--resume` brings that session's rules back.
+Dynamic triggers fire once by default; ask for a repeating trigger when you want it to keep
+running.
+
+Trigger actions run in a separate sub-agent. The sub-agent inherits the parent model, tools,
+tool hooks, thinking level, and skill catalog, but it does not receive the full parent
+conversation by default. Trigger output is shown in the TUI and written to trigger audit
+records. If you explicitly ask for the result to be visible to future turns, the rule is
+created with `promote_to_chat=true` and successful trigger output is inserted into the main
+chat context with a `[Trigger ...]` prefix.
+
+Local dynamic checks poll every 60 seconds by default, and only emit checks while at least
+one enabled dynamic rule exists. Configure the interval in `~/.pie/config.toml`:
+
+```toml
+[triggers]
+poll_interval_secs = 60
+```
+
+For one run, override it with:
+
+```bash
+./target/release/pie --trigger-poll-secs 10
+```
+
+MCP notifications are treated as trigger sources too: a configured MCP server can push an
+event into the same trigger runtime, where the same rules, audit, deduping, and output
+behavior apply.
 
 ## Files and storage
 
@@ -170,6 +215,7 @@ By default, `pie` stores local state under `~/.pie`:
 | `~/.pie/models.json` | User-global local/custom model definitions |
 | `~/.pie/history` | Prompt history |
 | `~/.pie/hooks.toml` | Optional command/webhook hooks |
+| `~/.pie/config.toml` | Optional user config, including trigger poll interval |
 
 Set `PIE_DIR` to use a different base directory.
 

@@ -20,6 +20,31 @@ pub async fn open_repo(cwd: &std::path::Path) -> JsonlSessionRepo {
     JsonlSessionRepo::new(sessions_dir_for_cwd(cwd))
 }
 
+/// Dynamic trigger rules are session-scoped sidecars next to the jsonl transcript.
+pub fn trigger_sidecar_path(session_path: &std::path::Path) -> PathBuf {
+    session_path.with_extension("triggers.json")
+}
+
+/// Return the dynamic-trigger sidecar for a live session.
+///
+/// Jsonl sessions record their absolute transcript path in metadata. Older or synthetic
+/// sessions may not have that field, so keep a deterministic fallback under the repo root.
+pub async fn trigger_sidecar_path_for_session(
+    session: &Session,
+    repo: &JsonlSessionRepo,
+) -> Result<PathBuf> {
+    let metadata = session.storage().get_metadata_json().await?;
+    if let Some(path) = metadata.get("path").and_then(|v| v.as_str()) {
+        return Ok(trigger_sidecar_path(std::path::Path::new(path)));
+    }
+
+    let session_id = metadata
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown-session");
+    Ok(repo.root().join(format!("{session_id}.triggers.json")))
+}
+
 /// Create a brand-new session under the current cwd's sessions dir.
 pub async fn create(repo: &JsonlSessionRepo, cwd: &std::path::Path) -> Result<Session> {
     Ok(repo.create(cwd.to_string_lossy().to_string()).await?)
@@ -112,6 +137,12 @@ pub async fn delete_by_id(repo: &JsonlSessionRepo, id: &str) -> Result<PathBuf> 
         .await?
         .with_context(|| format!("no session matches id {id}"))?;
     repo.delete(&path).await?;
+    let trigger_sidecar = trigger_sidecar_path(&path);
+    match tokio::fs::remove_file(&trigger_sidecar).await {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e).with_context(|| format!("delete {}", trigger_sidecar.display())),
+    }
     Ok(path)
 }
 
@@ -244,5 +275,60 @@ mod tests {
         let deleted = delete_by_id(&repo, "metadata").await.unwrap();
         assert_eq!(deleted, path);
         assert!(!deleted.exists());
+    }
+
+    #[test]
+    fn trigger_sidecar_path_lives_next_to_session_file() {
+        let path = std::path::Path::new("/tmp/session-id.jsonl");
+        assert_eq!(
+            trigger_sidecar_path(path),
+            std::path::PathBuf::from("/tmp/session-id.triggers.json")
+        );
+    }
+
+    #[tokio::test]
+    async fn trigger_sidecar_path_survives_session_resume() {
+        let dir = tempdir().unwrap();
+        let repo = JsonlSessionRepo::new(dir.path());
+        let created = repo.create("/cwd").await.unwrap();
+        let metadata = created.storage().get_metadata_json().await.unwrap();
+        let session_id = metadata.get("id").and_then(|v| v.as_str()).unwrap();
+        let session_path = metadata.get("path").and_then(|v| v.as_str()).unwrap();
+        let expected = trigger_sidecar_path(std::path::Path::new(session_path));
+
+        std::fs::write(&expected, "{\"version\":1,\"rules\":[]}").unwrap();
+        let resumed = resume(&repo, Some(session_id)).await.unwrap();
+
+        assert_eq!(
+            trigger_sidecar_path_for_session(&resumed, &repo)
+                .await
+                .unwrap(),
+            expected
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_removes_trigger_sidecar() {
+        let dir = tempdir().unwrap();
+        let repo = JsonlSessionRepo::new(dir.path());
+        let session = repo.create("/cwd").await.unwrap();
+        let id = session
+            .storage()
+            .get_metadata_json()
+            .await
+            .unwrap()
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .to_string();
+        let session_path = repo.list().await.unwrap().pop().unwrap();
+        let trigger_path = trigger_sidecar_path(&session_path);
+        std::fs::write(&trigger_path, "{}").unwrap();
+
+        let deleted = delete_by_id(&repo, &id).await.unwrap();
+
+        assert_eq!(deleted, session_path);
+        assert!(!deleted.exists());
+        assert!(!trigger_path.exists());
     }
 }

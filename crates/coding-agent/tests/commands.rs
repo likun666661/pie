@@ -8,16 +8,21 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use pie_agent_core::{
-    AgentHarness, AgentHarnessOptions, MemorySessionStorage, Session, SessionStorage,
+    AgentHarness, AgentHarnessOptions, AgentTool, MemorySessionStorage, Session, SessionStorage,
     SessionTreeEntry, Skill, ThinkingLevel,
+};
+use pie_ai::{
+    AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream, AssistantRole,
+    ContentBlock, Context, DoneReason, Message, StopReason, ToolCall, Usage,
 };
 
 static PATH_ENV_LOCK: Mutex<()> = Mutex::new(());
 static PIE_DIR_ENV_LOCK: Mutex<()> = Mutex::new(());
+static DYNAMIC_TRIGGER_LOCK: Mutex<()> = Mutex::new(());
 
 // The binary crate doesn't expose `commands` — pull it in via path-include so this test
 // exercises the actual code path without restructuring the crate as a [lib]. `commands.rs`
-// references `crate::export`, so we include those siblings too. They appear unused-from-tests
+// references sibling modules through `crate::...`, so we include those siblings too. They appear unused-from-tests
 // (no items are called directly here) — that's fine; the commands module reaches into them.
 #[allow(dead_code)]
 #[path = "../src/auth.rs"]
@@ -39,6 +44,9 @@ mod history;
 #[allow(dead_code)]
 #[path = "../src/session/mod.rs"]
 mod session;
+#[allow(dead_code)]
+#[path = "../src/triggers/mod.rs"]
+mod triggers;
 
 fn faux_model() -> pie_ai::Model {
     pie_ai::Model {
@@ -55,6 +63,84 @@ fn faux_model() -> pie_ai::Model {
         max_tokens: 0,
         headers: None,
         compat: None,
+    }
+}
+
+fn new_trigger_extraction_stream() -> pie_agent_core::StreamFn {
+    Arc::new(|_, context: &Context, _| {
+        let has_tool_result = context
+            .messages
+            .iter()
+            .any(|m| matches!(m, Message::ToolResult(_)));
+        let message = if has_tool_result {
+            assistant_text("created")
+        } else {
+            assistant_tool_call(
+                "call-new-trigger",
+                "NewTrigger",
+                serde_json::json!({
+                    "condition": "\u{73b0}\u{5728}\u{662f} 11pm",
+                    "action": "\u{5199}\u{4e00}\u{4e2a} tmp \u{6587}\u{4ef6}",
+                }),
+            )
+        };
+        stream_one(message)
+    })
+}
+
+fn stream_one(message: AssistantMessage) -> AssistantMessageEventStream {
+    let (stream, mut sender) = AssistantMessageEventStream::new();
+    tokio::spawn(async move {
+        sender.push(AssistantMessageEvent::Start {
+            partial: message.clone(),
+        });
+        sender.push(AssistantMessageEvent::Done {
+            reason: match message.stop_reason {
+                StopReason::ToolUse => DoneReason::ToolUse,
+                _ => DoneReason::Stop,
+            },
+            message,
+        });
+    });
+    stream
+}
+
+fn assistant_tool_call(id: &str, name: &str, args: serde_json::Value) -> AssistantMessage {
+    let arguments = args.as_object().cloned().unwrap_or_default();
+    assistant(vec![ContentBlock::ToolCall(ToolCall {
+        id: id.into(),
+        name: name.into(),
+        arguments,
+        thought_signature: None,
+    })])
+}
+
+fn assistant_text(text: &str) -> AssistantMessage {
+    assistant(vec![ContentBlock::text(text)])
+}
+
+fn assistant(content: Vec<ContentBlock>) -> AssistantMessage {
+    let stop_reason = if content
+        .iter()
+        .any(|block| matches!(block, ContentBlock::ToolCall(_)))
+    {
+        StopReason::ToolUse
+    } else {
+        StopReason::Stop
+    };
+    AssistantMessage {
+        role: AssistantRole::Assistant,
+        content,
+        api: pie_ai::Api::from("faux"),
+        provider: pie_ai::Provider::from("faux"),
+        model: "faux".into(),
+        response_model: None,
+        response_id: None,
+        diagnostics: None,
+        usage: Usage::default(),
+        stop_reason,
+        error_message: None,
+        timestamp: 0,
     }
 }
 
@@ -131,9 +217,13 @@ async fn dispatch_unknown_command_returns_error_outcome() {
 
 #[tokio::test]
 async fn dispatch_triggers_status_is_read_only_and_available() {
+    triggers::global_registry().clear_for_tests();
+
     let storage = Arc::new(MemorySessionStorage::new());
     let session = Session::new(storage as Arc<dyn SessionStorage>);
-    let opts = AgentHarnessOptions::new(faux_model(), session.clone());
+    let mut opts = AgentHarnessOptions::new(faux_model(), session.clone());
+    opts.tools = vec![Arc::new(triggers::NewTriggerTool) as Arc<dyn AgentTool>];
+    opts.stream_fn = Some(new_trigger_extraction_stream());
     let harness = Arc::new(AgentHarness::new(opts));
 
     let registry = commands::Registry::with_builtins();
@@ -151,6 +241,128 @@ async fn dispatch_triggers_status_is_read_only_and_available() {
     assert!(
         session.entries().await.unwrap().is_empty(),
         "/triggers status must not mutate the session"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dispatch_new_trigger_registers_dynamic_rule() {
+    let _guard = DYNAMIC_TRIGGER_LOCK.lock().unwrap();
+    triggers::global_registry().clear_for_tests();
+
+    let storage = Arc::new(MemorySessionStorage::new());
+    let session = Session::new(storage as Arc<dyn SessionStorage>);
+    let mut opts = AgentHarnessOptions::new(faux_model(), session.clone());
+    opts.tools = vec![Arc::new(triggers::NewTriggerTool) as Arc<dyn AgentTool>];
+    opts.stream_fn = Some(new_trigger_extraction_stream());
+    let harness = Arc::new(AgentHarness::new(opts));
+
+    let registry = commands::Registry::with_builtins();
+    let cwd = std::env::current_dir().unwrap();
+    let ctx = commands::CommandCtx {
+        harness: &harness,
+        session_id: "test",
+        log_path: None,
+        tool_count: 0,
+        cwd: &cwd,
+    };
+
+    let condition = "\u{73b0}\u{5728}\u{662f} 11pm";
+    let action = "\u{5199}\u{4e00}\u{4e2a} tmp \u{6587}\u{4ef6}";
+    let prompt =
+        format!("/new-trigger \u{968f}\u{4fbf}\u{8bf4}\u{4e00}\u{53e5}: {condition}; {action}");
+
+    let outcome = commands::dispatch(&prompt, &registry, &ctx).await;
+    assert!(
+        matches!(outcome, commands::CommandOutcome::Handled),
+        "outcome: {outcome:?}"
+    );
+
+    let rules = triggers::global_registry().list();
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0].condition, condition);
+    assert_eq!(rules[0].action, action);
+    let status_lines = commands::render_triggers_status(&harness.notification_status_snapshot());
+    assert!(
+        status_lines
+            .iter()
+            .any(|line| line.contains("dynamic rules: 1"))
+    );
+    assert!(status_lines.iter().any(|line| line.contains(&rules[0].id)));
+    assert!(status_lines.iter().any(|line| line.contains("tmp")));
+    assert!(
+        !session.entries().await.unwrap().is_empty(),
+        "/new-trigger routes through the agent so the model can extract condition/action"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dispatch_triggers_remove_deletes_dynamic_rule() {
+    let _guard = DYNAMIC_TRIGGER_LOCK.lock().unwrap();
+    triggers::global_registry().clear_for_tests();
+    let rule = triggers::global_registry()
+        .add_rule("event says delete this", "echo deleted")
+        .expect("rule");
+
+    let storage = Arc::new(MemorySessionStorage::new());
+    let session = Session::new(storage as Arc<dyn SessionStorage>);
+    let opts = AgentHarnessOptions::new(faux_model(), session.clone());
+    let harness = Arc::new(AgentHarness::new(opts));
+
+    let registry = commands::Registry::with_builtins();
+    let cwd = std::env::current_dir().unwrap();
+    let ctx = commands::CommandCtx {
+        harness: &harness,
+        session_id: "test",
+        log_path: None,
+        tool_count: 0,
+        cwd: &cwd,
+    };
+
+    let outcome =
+        commands::dispatch(&format!("/triggers remove {}", rule.id), &registry, &ctx).await;
+    assert!(matches!(outcome, commands::CommandOutcome::Handled));
+    assert!(triggers::global_registry().list().is_empty());
+    assert!(
+        session.entries().await.unwrap().is_empty(),
+        "/triggers remove only mutates the dynamic rule registry"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dispatch_triggers_disable_and_enable_updates_rule_state() {
+    let _guard = DYNAMIC_TRIGGER_LOCK.lock().unwrap();
+    triggers::global_registry().clear_for_tests();
+    let rule = triggers::global_registry()
+        .add_rule("event says toggle this", "echo toggled")
+        .expect("rule");
+
+    let storage = Arc::new(MemorySessionStorage::new());
+    let session = Session::new(storage as Arc<dyn SessionStorage>);
+    let opts = AgentHarnessOptions::new(faux_model(), session.clone());
+    let harness = Arc::new(AgentHarness::new(opts));
+
+    let registry = commands::Registry::with_builtins();
+    let cwd = std::env::current_dir().unwrap();
+    let ctx = commands::CommandCtx {
+        harness: &harness,
+        session_id: "test",
+        log_path: None,
+        tool_count: 0,
+        cwd: &cwd,
+    };
+
+    let outcome =
+        commands::dispatch(&format!("/triggers disable {}", rule.id), &registry, &ctx).await;
+    assert!(matches!(outcome, commands::CommandOutcome::Handled));
+    assert!(!triggers::global_registry().list()[0].enabled);
+
+    let outcome =
+        commands::dispatch(&format!("/triggers enable {}", rule.id), &registry, &ctx).await;
+    assert!(matches!(outcome, commands::CommandOutcome::Handled));
+    assert!(triggers::global_registry().list()[0].enabled);
+    assert!(
+        session.entries().await.unwrap().is_empty(),
+        "/triggers enable/disable only mutates the dynamic rule registry"
     );
 }
 

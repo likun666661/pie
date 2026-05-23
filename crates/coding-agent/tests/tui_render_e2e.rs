@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use pie_agent_core::{AgentEvent, AgentMessage, AgentTool, AgentToolResult};
+use pie_agent_core::{AgentEvent, AgentMessage, AgentTool, AgentToolResult, HarnessEvent};
 use pie_ai::{
     AssistantMessage, AssistantMessageEvent, AssistantRole, ContentBlock, ImageContent, Message,
     StopReason, ToolCall, ToolResultMessage, ToolResultRole, Usage, UserContentBlock,
@@ -584,4 +584,107 @@ fn streaming_chunks_preserve_chinese() {
         plain.contains("你好，世界！"),
         "single-char chunked text dropped chars: {plain}"
     );
+}
+
+#[test]
+fn trigger_completion_renders_live_result_line() {
+    let tui = tui::Tui::new();
+    let mut buf: Vec<u8> = Vec::new();
+
+    tui.render_event(&AgentEvent::AgentStart, &mut buf);
+    let partial = assistant(vec![ContentBlock::text("")]);
+    tui.render_event(
+        &message_update(
+            AssistantMessageEvent::TextDelta {
+                content_index: 0,
+                delta: "partial reply".into(),
+                partial: partial.clone(),
+            },
+            partial,
+        ),
+        &mut buf,
+    );
+    tui.render_harness_event(
+        &HarnessEvent::TriggerCompleted {
+            trace_id: "trace-live-result".into(),
+            summary: Some("wrote /tmp/trigger-output".into()),
+            cost_usd: None,
+        },
+        &mut buf,
+    );
+
+    let plain = strip_ansi(&String::from_utf8(buf).unwrap());
+    assert!(plain.contains("partial reply\n"), "{plain}");
+    assert!(
+        plain.contains("[trigger completed] trace=trace-live-result wrote /tmp/trigger-output"),
+        "{plain}"
+    );
+}
+
+#[test]
+fn trigger_completion_starts_on_new_line_while_readline_prompt_is_idle() {
+    let tui = tui::Tui::new();
+    let mut buf: Vec<u8> = Vec::new();
+
+    tui.render_harness_event(
+        &HarnessEvent::TriggerCompleted {
+            trace_id: "trace-idle-result".into(),
+            summary: Some("hello from trigger".into()),
+            cost_usd: None,
+        },
+        &mut buf,
+    );
+
+    let plain = strip_ansi(&String::from_utf8(buf).unwrap());
+    assert!(
+        plain.starts_with("\n[trigger completed] trace=trace-idle-result hello from trigger"),
+        "{plain:?}"
+    );
+}
+
+#[test]
+fn trigger_failure_renders_live_error_line() {
+    let tui = tui::Tui::new();
+    let mut buf: Vec<u8> = Vec::new();
+
+    tui.render_harness_event(
+        &HarnessEvent::TriggerFailed {
+            trace_id: "trace-failed".into(),
+            reason: "tool denied".into(),
+        },
+        &mut buf,
+    );
+
+    let plain = strip_ansi(&String::from_utf8(buf).unwrap());
+    assert!(
+        plain.contains("[trigger failed] trace=trace-failed tool denied"),
+        "{plain}"
+    );
+}
+
+#[test]
+fn dynamic_poll_no_match_stays_quiet() {
+    let tui = tui::Tui::new();
+    let mut buf: Vec<u8> = Vec::new();
+
+    tui.render_harness_event(
+        &HarnessEvent::TriggerExecutionStarted {
+            trace_id: "trace-dynamic-check".into(),
+            source_label: "local:dynamic".into(),
+            event_label: "dynamic periodic check".into(),
+            prompt_preview: "A trigger check event arrived.".into(),
+        },
+        &mut buf,
+    );
+    tui.render_harness_event(
+        &HarnessEvent::TriggerCompleted {
+            trace_id: "trace-dynamic-check".into(),
+            summary: Some("no dynamic trigger rule matched".into()),
+            cost_usd: None,
+        },
+        &mut buf,
+    );
+
+    let plain = strip_ansi(&String::from_utf8(buf).unwrap());
+    assert_eq!(plain, "");
 }

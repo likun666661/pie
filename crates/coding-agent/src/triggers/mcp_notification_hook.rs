@@ -76,7 +76,7 @@ pub struct McpNotificationHook {
     /// `!Sync`. After the first run, subsequent calls return `HookError::SinkClosed`
     /// because there is nothing left to drain.
     rx: Mutex<Option<UnboundedReceiver<McpServerNotification>>>,
-    /// Atomic-cheap status snapshot. Re-read frequently by `/triggers hooks`; we keep it
+    /// Atomic-cheap status snapshot. Re-read frequently by `/triggers sources`; we keep it
     /// behind `parking_lot::Mutex` (matches the trait's "atomic loads or
     /// `parking_lot::Mutex`" guidance).
     status: Arc<Mutex<NotificationHookStatus>>,
@@ -152,7 +152,7 @@ impl NotificationHook for McpNotificationHook {
                 };
                 return Err(HookError::SinkClosed);
             }
-            // Bookkeeping after successful push so `/triggers hooks` shows the latest event
+            // Bookkeeping after successful push so `/triggers sources` shows the latest event
             // even if the runtime is still draining the sink.
             let mut st = self.status.lock();
             st.last_event_at = Some(Utc::now());

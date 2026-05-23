@@ -2,7 +2,7 @@
 //! through their `AgentTool::execute` method without going through the agent loop.
 
 use pie_agent_core::AgentTool;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
 use tokio_util::sync::CancellationToken;
 
@@ -10,6 +10,11 @@ use tokio_util::sync::CancellationToken;
 #[path = "../src/tools/mod.rs"]
 #[allow(dead_code)]
 mod tools;
+#[path = "../src/triggers/mod.rs"]
+#[allow(dead_code)]
+mod triggers;
+
+static DYNAMIC_TRIGGER_LOCK: Mutex<()> = Mutex::new(());
 
 #[tokio::test]
 async fn read_writes_then_reads() {
@@ -88,6 +93,157 @@ async fn bash_captures_stdout_and_exit() {
     };
     assert!(text.contains("hello"));
     assert!(text.contains("[exit 0]"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn new_trigger_tool_registers_dynamic_rule() {
+    let _guard = DYNAMIC_TRIGGER_LOCK.lock().unwrap();
+    triggers::global_registry().clear_for_tests();
+
+    let tool = tools::new_trigger_tool();
+    let result = tool
+        .execute(
+            "new-trigger-1",
+            serde_json::json!({
+                "condition": "any future event matches this condition",
+                "action": "echo fired"
+            }),
+            CancellationToken::new(),
+            None,
+        )
+        .await
+        .expect("tool should create rule");
+
+    let rules = triggers::global_registry().list();
+    assert_eq!(rules.len(), 1);
+    assert_eq!(
+        rules[0].condition,
+        "any future event matches this condition"
+    );
+    assert_eq!(rules[0].action, "echo fired");
+
+    let text = match &result.content[0] {
+        pie_ai::UserContentBlock::Text(t) => t.text.clone(),
+        _ => panic!("expected text"),
+    };
+    assert!(text.contains("created dynamic trigger"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn new_trigger_tool_can_request_chat_promotion() {
+    let _guard = DYNAMIC_TRIGGER_LOCK.lock().unwrap();
+    triggers::global_registry().clear_for_tests();
+
+    let tool = tools::new_trigger_tool();
+    let result = tool
+        .execute(
+            "new-trigger-promote-1",
+            serde_json::json!({
+                "condition": "event says promote",
+                "action": "echo promote",
+                "promote_to_chat": true
+            }),
+            CancellationToken::new(),
+            None,
+        )
+        .await
+        .expect("tool should register promoted rule");
+
+    let rules = triggers::global_registry().list();
+    assert_eq!(rules.len(), 1);
+    assert!(rules[0].promote_to_chat);
+    assert_eq!(result.details["promote_to_chat"], true);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn list_triggers_tool_returns_dynamic_rules() {
+    let _guard = DYNAMIC_TRIGGER_LOCK.lock().unwrap();
+    triggers::global_registry().clear_for_tests();
+    let rule = triggers::global_registry()
+        .add_rule("event says list me", "echo listed")
+        .expect("rule");
+
+    let tool = tools::list_triggers_tool();
+    let result = tool
+        .execute(
+            "list-triggers-1",
+            serde_json::json!({}),
+            CancellationToken::new(),
+            None,
+        )
+        .await
+        .expect("tool should list rules");
+
+    let text = match &result.content[0] {
+        pie_ai::UserContentBlock::Text(t) => t.text.clone(),
+        _ => panic!("expected text"),
+    };
+    assert!(text.contains("dynamic trigger rules: 1"));
+    assert!(text.contains(&rule.id));
+    assert!(text.contains("event says list me"));
+    assert_eq!(result.details["count"], 1);
+    assert_eq!(result.details["rules"][0]["id"], rule.id);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn remove_trigger_tool_removes_dynamic_rule() {
+    let _guard = DYNAMIC_TRIGGER_LOCK.lock().unwrap();
+    triggers::global_registry().clear_for_tests();
+    let rule = triggers::global_registry()
+        .add_rule("event says remove me", "echo removed")
+        .expect("rule");
+
+    let tool = tools::remove_trigger_tool();
+    let result = tool
+        .execute(
+            "remove-trigger-1",
+            serde_json::json!({ "id": rule.id }),
+            CancellationToken::new(),
+            None,
+        )
+        .await
+        .expect("tool should remove rule");
+
+    assert!(triggers::global_registry().list().is_empty());
+    let text = match &result.content[0] {
+        pie_ai::UserContentBlock::Text(t) => t.text.clone(),
+        _ => panic!("expected text"),
+    };
+    assert!(text.contains("removed dynamic trigger"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn set_trigger_state_tool_disables_and_enables_rule() {
+    let _guard = DYNAMIC_TRIGGER_LOCK.lock().unwrap();
+    triggers::global_registry().clear_for_tests();
+    let rule = triggers::global_registry()
+        .add_rule("event says pause me", "echo paused")
+        .expect("rule");
+
+    let tool = tools::set_trigger_state_tool();
+    let disabled = tool
+        .execute(
+            "set-trigger-state-1",
+            serde_json::json!({ "id": rule.id, "enabled": false }),
+            CancellationToken::new(),
+            None,
+        )
+        .await
+        .expect("tool should disable rule");
+    assert_eq!(disabled.details["enabled"], false);
+    assert!(!triggers::global_registry().list()[0].enabled);
+
+    let enabled = tool
+        .execute(
+            "set-trigger-state-2",
+            serde_json::json!({ "id": rule.id, "enabled": true }),
+            CancellationToken::new(),
+            None,
+        )
+        .await
+        .expect("tool should enable rule");
+    assert_eq!(enabled.details["enabled"], true);
+    assert!(triggers::global_registry().list()[0].enabled);
 }
 
 #[tokio::test]

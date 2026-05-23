@@ -5,13 +5,14 @@
 //! non-TTY targets. We never enable raw mode; the REPL uses plain `stdin().lock().read_line`,
 //! which means Ctrl-C interrupts the whole process — fine for a "simple" agent.
 
+use std::collections::HashSet;
 use std::io::Write as _;
 use std::sync::Arc;
 
 use crossterm::ExecutableCommand;
 use crossterm::style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor};
 use parking_lot::Mutex;
-use pie_agent_core::{AgentEvent, AgentListener, AgentMessage};
+use pie_agent_core::{AgentEvent, AgentListener, AgentMessage, HarnessEvent, HarnessListener};
 use pie_ai::{
     AssistantMessageEvent, ContentBlock, ImageContent, Message, UserContent, UserContentBlock,
 };
@@ -24,6 +25,8 @@ struct RenderState {
     trim_text_prefix: bool,
     /// True while a thinking block is being streamed.
     thinking_open: bool,
+    /// Trace ids for background dynamic checks that should stay quiet unless they do work.
+    quiet_dynamic_trigger_traces: HashSet<String>,
 }
 
 #[derive(Clone)]
@@ -106,9 +109,21 @@ impl Tui {
         })
     }
 
+    pub fn harness_listener(&self) -> HarnessListener {
+        let me = self.clone();
+        Arc::new(move |event| {
+            me.handle_harness_event(&event);
+        })
+    }
+
     fn handle_event(&self, event: &AgentEvent) {
         let mut out = std::io::stdout();
         self.render_event(event, &mut out);
+    }
+
+    fn handle_harness_event(&self, event: &HarnessEvent) {
+        let mut out = std::io::stdout();
+        self.render_harness_event(event, &mut out);
     }
 
     /// Render one event to any `Write`. Stdout in production, a `Vec<u8>` in tests so we
@@ -195,25 +210,100 @@ impl Tui {
         }
     }
 
-    fn close_thinking(&self, out: &mut dyn std::io::Write) {
-        if self.state.lock().thinking_open {
-            let _ = writeln!(out, "{RESET}");
-            self.state.lock().thinking_open = false;
+    pub fn render_harness_event(&self, event: &HarnessEvent, out: &mut dyn std::io::Write) {
+        match event {
+            HarnessEvent::TriggerCompleted {
+                trace_id, summary, ..
+            } => {
+                let summary = summary.as_deref().unwrap_or("completed");
+                if self
+                    .state
+                    .lock()
+                    .quiet_dynamic_trigger_traces
+                    .remove(trace_id)
+                    && summary.trim() == "no dynamic trigger rule matched"
+                {
+                    return;
+                }
+                self.begin_async_status_line(out);
+                let _ = writeln!(
+                    out,
+                    "{DARK_GREEN}[trigger completed] trace={} {}{RESET}",
+                    truncate_chars(trace_id, 24),
+                    truncate_chars(summary, 180)
+                );
+                let _ = out.flush();
+            }
+            HarnessEvent::TriggerFailed { trace_id, reason } => {
+                self.state
+                    .lock()
+                    .quiet_dynamic_trigger_traces
+                    .remove(trace_id);
+                self.begin_async_status_line(out);
+                let _ = writeln!(
+                    out,
+                    "{RED}[trigger failed] trace={} {}{RESET}",
+                    truncate_chars(trace_id, 24),
+                    truncate_chars(reason, 180)
+                );
+                let _ = out.flush();
+            }
+            HarnessEvent::TriggerExecutionStarted {
+                trace_id,
+                source_label,
+                event_label,
+                prompt_preview,
+            } => {
+                if source_label == "local:dynamic" && event_label == "dynamic periodic check" {
+                    self.state
+                        .lock()
+                        .quiet_dynamic_trigger_traces
+                        .insert(trace_id.clone());
+                    return;
+                }
+                self.begin_async_status_line(out);
+                let _ = writeln!(
+                    out,
+                    "{DARK_GREY}[trigger running] trace={} {}{RESET}",
+                    truncate_chars(trace_id, 24),
+                    truncate_chars(prompt_preview, 120)
+                );
+                let _ = out.flush();
+            }
+            _ => {}
         }
     }
 
-    fn close_text(&self, out: &mut dyn std::io::Write) {
+    fn close_thinking(&self, out: &mut dyn std::io::Write) -> bool {
+        if self.state.lock().thinking_open {
+            let _ = writeln!(out, "{RESET}");
+            self.state.lock().thinking_open = false;
+            return true;
+        }
+        false
+    }
+
+    fn close_text(&self, out: &mut dyn std::io::Write) -> bool {
         if self.state.lock().text_open {
             let _ = writeln!(out);
             let mut s = self.state.lock();
             s.text_open = false;
             s.trim_text_prefix = true;
+            return true;
         }
+        false
     }
 
-    fn close_open_block(&self, out: &mut dyn std::io::Write) {
-        self.close_thinking(out);
-        self.close_text(out);
+    fn close_open_block(&self, out: &mut dyn std::io::Write) -> bool {
+        let closed_thinking = self.close_thinking(out);
+        let closed_text = self.close_text(out);
+        closed_thinking || closed_text
+    }
+
+    fn begin_async_status_line(&self, out: &mut dyn std::io::Write) {
+        if !self.close_open_block(out) {
+            let _ = writeln!(out);
+        }
     }
 }
 

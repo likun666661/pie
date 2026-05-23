@@ -78,3 +78,30 @@ pub fn task_tool(
 pub fn skill_tool(harness_cell: skill::SkillHarnessCell) -> Arc<dyn AgentTool> {
     Arc::new(skill::SkillTool::new(harness_cell))
 }
+
+/// Build the dynamic trigger creation tool. This is model-facing counterpart to the
+/// `/new-trigger` slash command: when the user asks in ordinary conversation to create an
+/// automation, the model can register the rule without requiring slash-command syntax.
+pub fn new_trigger_tool() -> Arc<dyn AgentTool> {
+    Arc::new(crate::triggers::NewTriggerTool)
+}
+
+/// Build the dynamic trigger listing tool. This is the model-facing counterpart to
+/// `/triggers rules`: it lets the assistant inspect current rule ids before answering or
+/// removing a rule.
+pub fn list_triggers_tool() -> Arc<dyn AgentTool> {
+    Arc::new(crate::triggers::ListTriggersTool)
+}
+
+/// Build the dynamic trigger removal tool. This is the model-facing counterpart to
+/// `/triggers remove`: when the user asks in ordinary conversation to delete a trigger, the
+/// model can remove the rule by id or clear all rules when explicitly requested.
+pub fn remove_trigger_tool() -> Arc<dyn AgentTool> {
+    Arc::new(crate::triggers::RemoveTriggerTool)
+}
+
+/// Build the dynamic trigger state tool. This lets the model pause/resume a trigger without
+/// deleting the rule and losing its condition/action text.
+pub fn set_trigger_state_tool() -> Arc<dyn AgentTool> {
+    Arc::new(crate::triggers::SetTriggerStateTool)
+}

@@ -108,6 +108,11 @@ struct Cli {
     /// `[builtin_skills] enabled = [...]`; CLI + config are unioned and de-duplicated.
     #[arg(long = "builtin-skill", value_name = "NAME")]
     builtin_skill: Vec<String>,
+
+    /// Poll interval for local dynamic trigger checks, in seconds. Defaults to
+    /// `[triggers] poll_interval_secs` from `~/.pie/config.toml`, or 60 when unset.
+    #[arg(long = "trigger-poll-secs", value_name = "SECONDS", value_parser = clap::value_parser!(u64).range(1..))]
+    trigger_poll_secs: Option<u64>,
 }
 
 #[tokio::main]
@@ -213,20 +218,23 @@ async fn run_repl(mut cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo)
         let s = session::create(&repo, &cwd).await?;
         (s, false)
     };
-    let session_id = session
-        .storage()
-        .get_metadata_json()
-        .await?
+    let session_metadata = session.storage().get_metadata_json().await?;
+    let session_id = session_metadata
         .get("id")
         .and_then(|v| v.as_str())
         .unwrap_or("?")
         .to_string();
+    let dynamic_trigger_path = session::trigger_sidecar_path_for_session(&session, &repo).await?;
 
     // Install the tracing subscriber. Failure is non-fatal — we keep running without logs.
     let logging = logging::init(&session_id);
 
     // Build the harness.
     let stream_fn = stream_fn_with_auth_store();
+    let dynamic_trigger_registry = triggers::global_registry().clone();
+    let dynamic_trigger_load_error = dynamic_trigger_registry
+        .load_from_path(dynamic_trigger_path)
+        .err();
     let memory_dir = config::memory_dir();
     let mut tools = tools::default_tools(memory_dir.clone());
     // Task delegation tool (issue #11). Shares the parent's model + stream backend so its
@@ -239,14 +247,18 @@ async fn run_repl(mut cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo)
     let skill_harness_cell: tools::skill::SkillHarnessCell =
         std::sync::Arc::new(once_cell::sync::OnceCell::new());
     tools.push(tools::skill_tool(skill_harness_cell.clone()));
+    tools.push(tools::new_trigger_tool());
+    tools.push(tools::list_triggers_tool());
+    tools.push(tools::remove_trigger_tool());
+    tools.push(tools::set_trigger_state_tool());
 
     // MCP (issue #9): spawn every server configured under ~/.pie/mcp.toml or
-    // <cwd>/.pie/mcp.toml, append their tools to the registry. The notification hooks
-    // returned alongside the tools (RFC 1 — issue #20) are registered with the harness
-    // a few lines below, once we have an `Arc<AgentHarness>`.
+    // <cwd>/.pie/mcp.toml, append their tools to the registry. MCP push adapters are
+    // registered as trigger sources a few lines below, once we have an `Arc<AgentHarness>`.
     let mcp = mcp_loader::load_all(&cwd).await;
     let mcp_tool_count = mcp.tools.len();
     let mcp_notification_hooks = mcp.notification_hooks;
+    let mcp_notification_hook_count = mcp_notification_hooks.len();
     tools.extend(mcp.tools);
     let tool_names = tools
         .iter()
@@ -266,6 +278,9 @@ async fn run_repl(mut cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo)
     // project layers (already in `loaded_skills.skills`) can shadow on name collision via
     // the same precedence rule the harness already uses.
     let config_enabled_builtins = read_builtin_skills_config(&config::base_dir()).await;
+    let (trigger_poll_secs, trigger_config_diagnostic) =
+        read_trigger_poll_interval_secs(&config::base_dir(), cli.trigger_poll_secs).await;
+    triggers::dynamic::set_dynamic_trigger_poll_interval_secs(trigger_poll_secs);
     let resolved_builtins =
         match builtin_skills::resolve_builtins(&cli.builtin_skill, &config_enabled_builtins) {
             Ok(r) => r,
@@ -289,6 +304,9 @@ async fn run_repl(mut cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo)
     opts.stream_fn = Some(stream_fn.clone());
     opts.before_tool_call =
         Some(PermissionPolicy::default_for_coding_agent().as_before_tool_call());
+    opts.before_trigger_action = Some(triggers::before_trigger_action_hook(
+        dynamic_trigger_registry.clone(),
+    ));
     // LSP feedback loop (issue #12): attach diagnostics to write/edit tool results when
     // ~/.pie/lsp.toml or <cwd>/.pie/lsp.toml is configured.
     let lsp_supervisor = std::sync::Arc::new(lsp_supervisor::LspSupervisor::load(&cwd).await);
@@ -316,7 +334,7 @@ async fn run_repl(mut cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo)
         "Skill tool harness cell was set twice; main.rs wiring is the only setter"
     );
 
-    // Wire each MCP server's `McpNotificationHook` into the harness now that all
+    // Wire each MCP server's trigger-source adapter into the harness now that all
     // tool-initialized state (including the Skill cell above) is in place.
     // `register_notification_hook` spawns a driver task that runs `hook.run(sink)` and a
     // pump task that drains the sink into `handle_trigger`; both tear down naturally when
@@ -324,6 +342,9 @@ async fn run_repl(mut cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo)
     for hook in mcp_notification_hooks {
         harness.register_notification_hook(hook);
     }
+    harness.register_notification_hook(std::sync::Arc::new(
+        triggers::DynamicTriggerCheckHook::new(dynamic_trigger_registry.clone()),
+    ));
 
     let session_runner =
         agent_session::AgentSession::new(harness.clone(), agent_session::RetrySettings::default());
@@ -362,6 +383,9 @@ async fn run_repl(mut cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo)
     for diag in &resolved_builtins.diagnostics {
         tui.system_line(diag);
     }
+    if let Some(diag) = trigger_config_diagnostic {
+        tui.error_line(&diag);
+    }
     if !combined_skills.is_empty() {
         tui.system_line(&format!(
             "loaded {} skill(s): {}",
@@ -371,6 +395,19 @@ async fn run_repl(mut cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo)
                 .map(|s| s.name.as_str())
                 .collect::<Vec<_>>()
                 .join(", ")
+        ));
+    }
+    if let Some(err) = &dynamic_trigger_load_error {
+        tui.error_line(&format!("dynamic triggers: {err}"));
+    } else if !dynamic_trigger_registry.list().is_empty() {
+        let location = dynamic_trigger_registry
+            .storage_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "memory".into());
+        tui.system_line(&format!(
+            "loaded {} dynamic trigger rule(s) from {}",
+            dynamic_trigger_registry.list().len(),
+            location
         ));
     }
     if !loaded_templates.templates.is_empty() {
@@ -391,6 +428,15 @@ async fn run_repl(mut cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo)
             mcp.client_count,
         ));
     }
+    if mcp_notification_hook_count > 0 {
+        tui.system_line(&format!(
+            "trigger sources: watching {} configured MCP push source(s)",
+            mcp_notification_hook_count
+        ));
+    }
+    tui.system_line(&format!(
+        "triggers: local dynamic checker polls every {trigger_poll_secs}s while enabled rules exist"
+    ));
     if lsp_lang_count > 0 {
         tui.system_line(&format!(
             "lsp: {lsp_lang_count} language(s) configured; diagnostics attach to edit/write results"
@@ -430,6 +476,10 @@ async fn run_repl(mut cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo)
 
     // Wire the TUI listener so each prompt's events stream live.
     let _unsub = harness.agent().subscribe(tui.listener());
+    let _unsub_harness_tui = harness.subscribe_harness(tui.harness_listener());
+    let _unsub_dynamic_fire_once = harness.subscribe_harness(triggers::fire_once_harness_listener(
+        dynamic_trigger_registry.clone(),
+    ));
     let _unsub_hooks = harness.agent().subscribe(hooks.runner.listener());
     let _unsub_harness_hooks = harness.subscribe_harness(hooks.runner.harness_listener());
 
@@ -726,7 +776,11 @@ fn render_base_prompt(tool_names: &[String]) -> String {
     format!(
         "You are pie-coding-agent, a minimal coding assistant running in a terminal. \
 You have access to the following tools: {inventory}. \
-Prefer running a tool over guessing. When making file changes, read the file first to confirm the exact current contents, then edit or write. Keep responses concise."
+Prefer running a tool over guessing. When making file changes, read the file first to confirm the exact current contents, then edit or write. Keep responses concise. \
+When the user asks to create a trigger, reminder, watcher, or automation, call NewTrigger and extract a natural-language condition and action from their request. Dynamic triggers fire once by default; set fire_once=false only when the user explicitly asks for a repeating trigger. Trigger output is shown in the TUI and audit by default; set promote_to_chat=true only when the user explicitly asks for trigger results to enter the main chat context or be visible to future turns. \
+When the user asks to view, list, show, inspect, or find trigger ids, call ListTriggers. \
+When the user asks to pause, disable, enable, or resume a dynamic trigger, call SetTriggerState. \
+When the user asks to delete, remove, or clear dynamic triggers, call RemoveTrigger."
     )
 }
 
@@ -803,6 +857,34 @@ async fn read_builtin_skills_config(base_dir: &std::path::Path) -> Vec<String> {
         return Vec::new();
     };
     builtin_skills::parse_builtin_skills_config(&text)
+}
+
+/// Resolve the local dynamic trigger poll interval. CLI overrides config; config overrides
+/// the built-in default. A malformed config reports a diagnostic but does not block startup.
+async fn read_trigger_poll_interval_secs(
+    base_dir: &std::path::Path,
+    cli_override: Option<u64>,
+) -> (u64, Option<String>) {
+    if let Some(secs) = cli_override {
+        return (secs, None);
+    }
+
+    let default = triggers::dynamic::DEFAULT_DYNAMIC_TRIGGER_POLL_INTERVAL_SECS;
+    let path = base_dir.join("config.toml");
+    let Ok(text) = tokio::fs::read_to_string(&path).await else {
+        return (default, None);
+    };
+    match config::parse_trigger_poll_interval_secs(&text) {
+        Ok(Some(secs)) => (secs, None),
+        Ok(None) => (default, None),
+        Err(err) => (
+            default,
+            Some(format!(
+                "triggers: ignoring invalid poll interval in {}: {err}",
+                path.display()
+            )),
+        ),
+    }
 }
 
 #[cfg(test)]

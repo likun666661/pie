@@ -10,6 +10,13 @@
 //! so they can be unit-tested against a synthetic `TriggerSink` (a
 //! `mpsc::unbounded_channel` receiver).
 
+pub mod dynamic;
 pub mod mcp_notification_hook;
 
+#[allow(unused_imports)]
+pub use dynamic::{
+    DynamicTriggerCheckHook, ListTriggersTool, NewTriggerTool, RemoveTriggerTool,
+    SetTriggerStateTool, before_trigger_action_hook, fire_once_harness_listener, global_registry,
+};
+#[allow(unused_imports)]
 pub use mcp_notification_hook::McpNotificationHook;

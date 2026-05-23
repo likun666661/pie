@@ -5,20 +5,6 @@ members = [
     "crates/agent",
     "crates/coding-agent",
     "crates/mcp",
-    "examples/notification-e2e",
-]
-
-# Default-members controls which crates are built/tested by bare `cargo build`, `cargo test`,
-# `cargo check`, `cargo clippy` invocations at the workspace root (no `--workspace` /
-# `-p` flag). Explicit `cargo <cmd> --workspace` still includes ALL members, examples
-# included. We keep example crates out of default-members so the day-to-day "build/test
-# everything I usually work on" flow stays fast; CI / release jobs that want full coverage
-# pass `--workspace` and intentionally pick up the examples too.
-default-members = [
-    "crates/ai",
-    "crates/agent",
-    "crates/coding-agent",
-    "crates/mcp",
 ]
 
 [workspace.package]

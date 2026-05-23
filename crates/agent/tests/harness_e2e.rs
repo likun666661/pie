@@ -3305,3 +3305,463 @@ async fn promote_summary_truncation_final_length_includes_marker_under_cap() {
         summary.len()
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────────────────
+// PromotionCondition — structured authorization gate for
+// PromoteAction::PromoteSummaryWhenResultDetailsMatch. These tests pin the runtime
+// contract directly (not through coding-agent's dynamic.rs path). Coverage:
+//   - pointer-missing / value-not-array / empty-intersection → distinct skip reasons
+//   - matching path → returns the intersection
+//   - skip reasons stringify to stable audit identifiers
+// ─────────────────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn promotion_condition_any_of_returns_intersection_on_match() {
+    use pie_agent_core::PromotionCondition;
+
+    let details = serde_json::json!({
+        "dynamic_trigger": {
+            "matched_rule_ids": ["dyn-keep-a", "dyn-keep-b", "dyn-other"],
+        }
+    });
+    let condition = PromotionCondition::AnyOf {
+        json_pointer: "/dynamic_trigger/matched_rule_ids".into(),
+        any_of: vec!["dyn-keep-a".into(), "dyn-not-present".into()],
+    };
+
+    let matched = condition.evaluate(&details).expect("should match");
+    assert_eq!(
+        matched,
+        vec!["dyn-keep-a".to_string()],
+        "only allow-list members in the marker array intersect"
+    );
+}
+
+#[test]
+fn promotion_condition_any_of_fails_closed_when_pointer_missing() {
+    use pie_agent_core::{PromotionCondition, PromotionConditionSkipReason};
+
+    // Mirrors the runtime default state before any marker tool writes through the builder.
+    let details = serde_json::Value::Null;
+    let condition = PromotionCondition::AnyOf {
+        json_pointer: "/dynamic_trigger/matched_rule_ids".into(),
+        any_of: vec!["dyn-a".into()],
+    };
+    assert_eq!(
+        condition.evaluate(&details),
+        Err(PromotionConditionSkipReason::PointerMissing),
+    );
+    assert_eq!(
+        PromotionConditionSkipReason::PointerMissing.as_audit_str(),
+        "result_details_missing",
+    );
+}
+
+#[test]
+fn promotion_condition_any_of_fails_closed_when_value_not_array() {
+    use pie_agent_core::{PromotionCondition, PromotionConditionSkipReason};
+
+    let details = serde_json::json!({ "dynamic_trigger": { "matched_rule_ids": "dyn-a" } });
+    let condition = PromotionCondition::AnyOf {
+        json_pointer: "/dynamic_trigger/matched_rule_ids".into(),
+        any_of: vec!["dyn-a".into()],
+    };
+    // Even if the scalar value would substring-match, it MUST NOT promote — contract is
+    // "value is an array of IDs that intersect any_of," not free-form text matching.
+    assert_eq!(
+        condition.evaluate(&details),
+        Err(PromotionConditionSkipReason::ValueNotArray),
+    );
+    assert_eq!(
+        PromotionConditionSkipReason::ValueNotArray.as_audit_str(),
+        "result_details_not_array",
+    );
+}
+
+#[test]
+fn promotion_condition_any_of_fails_closed_when_empty_intersection() {
+    use pie_agent_core::{PromotionCondition, PromotionConditionSkipReason};
+
+    let details = serde_json::json!({
+        "dynamic_trigger": {
+            "matched_rule_ids": ["dyn-other-a", "dyn-other-b"],
+        }
+    });
+    let condition = PromotionCondition::AnyOf {
+        json_pointer: "/dynamic_trigger/matched_rule_ids".into(),
+        any_of: vec!["dyn-keep".into()],
+    };
+    assert_eq!(
+        condition.evaluate(&details),
+        Err(PromotionConditionSkipReason::EmptyIntersection),
+    );
+    assert_eq!(
+        PromotionConditionSkipReason::EmptyIntersection.as_audit_str(),
+        "no_matching_rule_id",
+    );
+}
+
+/// Authorization separation invariant: even if `summary` text contains the configured
+/// rule IDs, promotion does NOT fire when `details` is empty. Pins the contract that
+/// `summary` is display-only and never an authorization channel.
+#[tokio::test]
+async fn promote_when_result_details_match_does_not_consult_summary() {
+    use pie_agent_core::{BeforeTriggerActionContext, PromoteAction, PromotionCondition};
+
+    let storage = Arc::new(MemorySessionStorage::new());
+    let session = Session::new(storage.clone() as Arc<dyn SessionStorage>);
+    let mut opts = AgentHarnessOptions::new(faux_model(), session.clone());
+    // Sub-agent reply embeds the rule id literally — would have triggered the deprecated
+    // substring path. With the structured path it MUST NOT promote because `details` stays
+    // null (no marker tool wired in this test).
+    opts.stream_fn = Some(faux_stream_fn("matched dyn-promote-me explicitly"));
+    opts.before_trigger_action = Some({
+        let hook: pie_agent_core::BeforeTriggerActionHook =
+            Arc::new(move |ctx: BeforeTriggerActionContext, _cancel| {
+                Box::pin(async move {
+                    pie_agent_core::TriggerAction {
+                        prompt: format!(
+                            "{} fired: {}",
+                            ctx.trigger.source_label, ctx.trigger.event_label
+                        ),
+                        promote: PromoteAction::PromoteSummaryWhenResultDetailsMatch {
+                            template_body: None,
+                            condition: PromotionCondition::AnyOf {
+                                json_pointer: "/dynamic_trigger/matched_rule_ids".into(),
+                                any_of: vec!["dyn-promote-me".into()],
+                            },
+                        },
+                        promote_requires_approval: false,
+                    }
+                })
+            });
+        hook
+    });
+    let harness = AgentHarness::new(opts);
+
+    let events = Arc::new(std::sync::Mutex::new(Vec::<HarnessEvent>::new()));
+    let sink = events.clone();
+    let _unsub = harness.subscribe_harness(Arc::new(move |ev| {
+        sink.lock().unwrap().push(ev);
+    }));
+
+    let _ = harness
+        .handle_trigger(sample_trigger("k-struct", "trace-struct"))
+        .await;
+    wait_for_event(&events, 5, |evs| {
+        evs.iter().find_map(|e| match e {
+            HarnessEvent::TriggerCompleted { trace_id, .. } if trace_id == "trace-struct" => {
+                Some(())
+            }
+            _ => None,
+        })
+    })
+    .await
+    .expect("must complete");
+
+    let entries = session.entries().await.unwrap();
+
+    // 1. No parent Message inserted — summary text alone MUST NOT authorize promotion.
+    assert!(
+        !entries
+            .iter()
+            .any(|e| matches!(e, SessionTreeEntry::Message { .. })),
+        "summary substring is not an authorization channel; structured details required",
+    );
+
+    // 2. A trigger_promotion audit recorded the skip with a stable reason ID.
+    let skipped = entries
+        .iter()
+        .find_map(|e| match e {
+            SessionTreeEntry::Custom {
+                custom_type, data, ..
+            } if custom_type == "trigger_promotion" => data.clone(),
+            _ => None,
+        })
+        .expect("skipped promotion must still audit");
+    assert_eq!(skipped["state"], "skipped");
+    assert_eq!(skipped["reason"], "result_details_missing");
+    assert_eq!(
+        skipped["promote_kind"], "promote_summary_when_result_details_match",
+        "audit must identify the structured-promote path"
+    );
+
+    // 3. TriggerCompleted event reports details as null (no marker tool wired yet).
+    let evs = events.lock().unwrap().clone();
+    let completed = evs
+        .iter()
+        .find_map(|e| match e {
+            HarnessEvent::TriggerCompleted {
+                trace_id, details, ..
+            } if trace_id == "trace-struct" => Some(details.clone()),
+            _ => None,
+        })
+        .expect("TriggerCompleted");
+    assert_eq!(
+        completed,
+        serde_json::Value::Null,
+        "details defaults to null until a marker tool writes through the builder",
+    );
+}
+
+/// Promotion fired while the parent agent is mid-stream MUST NOT double-persist or land
+/// out of order. Pins QA's PR #67 blocker: the streaming branch hands off to the loop's
+/// follow-up queue (single persistence path via the session listener); audit reflects
+/// `state: "queued"` and `inserted_entry_id: null` because the entry ID is only known
+/// after the loop drains. Once the parent stream releases, the session must contain
+/// exactly one promoted Message::User AND it must come AFTER the parent's assistant
+/// response — never before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn promote_while_parent_is_streaming_routes_through_follow_up_single_write() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Notify;
+
+    // Controllable stream factory. The first call (parent's initial prompt) waits on
+    // `release` so we can race a trigger promotion against the in-flight stream. All
+    // later calls (sub-agent inside `handle_trigger`, parent's follow-up turn) resolve
+    // immediately so the test doesn't deadlock waiting on them.
+    fn controllable_stream_fn(release: Arc<Notify>) -> StreamFn {
+        let counter = Arc::new(AtomicUsize::new(0));
+        Arc::new(move |_, _, _| {
+            let n = counter.fetch_add(1, Ordering::SeqCst);
+            let release = release.clone();
+            let (stream, mut sender) = AssistantMessageEventStream::new();
+            tokio::spawn(async move {
+                if n == 0 {
+                    release.notified().await;
+                }
+                let body = match n {
+                    0 => "parent response",
+                    _ => "auxiliary response",
+                };
+                let msg = AssistantMessage {
+                    role: AssistantRole::Assistant,
+                    content: vec![ContentBlock::text(body)],
+                    api: pie_ai::Api::from("faux"),
+                    provider: pie_ai::Provider::from("faux"),
+                    model: "faux".into(),
+                    response_model: None,
+                    response_id: None,
+                    diagnostics: None,
+                    usage: Usage::default(),
+                    stop_reason: StopReason::Stop,
+                    error_message: None,
+                    timestamp: 0,
+                };
+                sender.push(AssistantMessageEvent::Start {
+                    partial: msg.clone(),
+                });
+                sender.push(AssistantMessageEvent::Done {
+                    reason: DoneReason::Stop,
+                    message: msg,
+                });
+            });
+            stream
+        })
+    }
+
+    let release = Arc::new(Notify::new());
+    let storage = Arc::new(MemorySessionStorage::new());
+    let session = Session::new(storage.clone() as Arc<dyn SessionStorage>);
+
+    let mut opts = AgentHarnessOptions::new(faux_model(), session.clone());
+    opts.stream_fn = Some(controllable_stream_fn(release.clone()));
+    opts.before_trigger_action = Some({
+        let hook: pie_agent_core::BeforeTriggerActionHook = Arc::new(
+            move |ctx: pie_agent_core::BeforeTriggerActionContext, _cancel| {
+                Box::pin(async move {
+                    pie_agent_core::TriggerAction {
+                        prompt: format!(
+                            "{} fired: {}",
+                            ctx.trigger.source_label, ctx.trigger.event_label
+                        ),
+                        // `PromoteSummaryNow` always fires (no conditional gate); we're
+                        // testing the persistence/ordering branch in `apply_promotion`,
+                        // not the condition evaluator.
+                        promote: pie_agent_core::PromoteAction::PromoteSummaryNow {
+                            template_body: None,
+                        },
+                        promote_requires_approval: false,
+                    }
+                })
+            },
+        );
+        hook
+    });
+    let harness = Arc::new(AgentHarness::new(opts));
+
+    let events = Arc::new(std::sync::Mutex::new(Vec::<HarnessEvent>::new()));
+    let sink = events.clone();
+    let _unsub = harness.subscribe_harness(Arc::new(move |ev| {
+        sink.lock().unwrap().push(ev);
+    }));
+
+    // Spawn parent prompt in background; it'll block at the stream's first `notified().await`
+    // until we release. `is_streaming()` should be true during this window.
+    let harness_clone = harness.clone();
+    let parent_task = tokio::spawn(async move { harness_clone.prompt("kick off parent").await });
+
+    // Wait for the parent to actually enter the streaming state.
+    for _ in 0..200 {
+        if harness.agent().is_streaming() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert!(
+        harness.agent().is_streaming(),
+        "parent agent must be streaming before we fire the trigger",
+    );
+
+    // Fire the trigger while parent is still mid-stream. The sub-agent is built with the
+    // same stream_fn but its call is `n=1` so resolves immediately.
+    let _ = harness
+        .handle_trigger(sample_trigger("k-streaming", "trace-streaming"))
+        .await;
+
+    // Wait for `TriggerPromoted` so we know `apply_promotion` ran while parent was still
+    // streaming. (Doesn't release the parent stream yet.)
+    wait_for_event(&events, 5, |evs| {
+        evs.iter().find_map(|e| match e {
+            HarnessEvent::TriggerPromoted { trace_id, .. } if trace_id == "trace-streaming" => {
+                Some(())
+            }
+            _ => None,
+        })
+    })
+    .await
+    .expect("TriggerPromoted must fire");
+
+    // The promotion ran during streaming → audit MUST be the queued shape, not success.
+    // No Message::User in session yet — the loop hasn't drained the follow-up.
+    let mid_entries = session.entries().await.unwrap();
+    let mid_promotion_audit = mid_entries
+        .iter()
+        .find_map(|e| match e {
+            SessionTreeEntry::Custom {
+                custom_type, data, ..
+            } if custom_type == "trigger_promotion" => data.clone(),
+            _ => None,
+        })
+        .expect("trigger_promotion audit must exist during streaming case");
+    assert_eq!(
+        mid_promotion_audit["state"], "queued",
+        "streaming-branch promotion audit must report state=queued, got {mid_promotion_audit}",
+    );
+    assert!(
+        mid_promotion_audit["inserted_entry_id"].is_null(),
+        "inserted_entry_id MUST be null while message is queued (ID only known after loop drains)",
+    );
+    let mid_user_count = mid_entries
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                SessionTreeEntry::Message {
+                    message: AgentMessage::Llm(pie_ai::Message::User(_)),
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(
+        mid_user_count, 1,
+        "before parent stream releases, session should have exactly 1 user message (the parent's initial prompt); got {mid_user_count}",
+    );
+
+    // Release the parent's first stream → loop appends assistant response → drains
+    // follow_up → emits the promoted user message → session listener writes once.
+    // Subsequent stream calls (parent's continuation after follow_up drain) resolve
+    // immediately via `n != 0` branch.
+    release.notify_one();
+    let _ = parent_task.await.expect("parent task should join");
+    // Allow listener writes to flush (subscribe_harness uses spawned tasks).
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let final_entries = session.entries().await.unwrap();
+
+    // Single persistence path: exactly TWO user messages now (initial prompt + promoted),
+    // never three or more.
+    let user_msgs: Vec<&SessionTreeEntry> = final_entries
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                SessionTreeEntry::Message {
+                    message: AgentMessage::Llm(pie_ai::Message::User(_)),
+                    ..
+                }
+            )
+        })
+        .collect();
+    assert_eq!(
+        user_msgs.len(),
+        2,
+        "single persistence path: expected exactly 2 user messages (initial prompt + promoted), got {}",
+        user_msgs.len(),
+    );
+
+    // Deterministic order: the promoted user message MUST come AFTER the parent's
+    // assistant response in the session JSONL.
+    let positions: Vec<(usize, &str)> = final_entries
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, e)| match e {
+            SessionTreeEntry::Message {
+                message: AgentMessage::Llm(pie_ai::Message::User(u)),
+                ..
+            } => match &u.content {
+                pie_ai::UserContent::Text(t) if t.starts_with("[Trigger ") => {
+                    Some((idx, "promoted"))
+                }
+                _ => None,
+            },
+            SessionTreeEntry::Message {
+                message: AgentMessage::Llm(pie_ai::Message::Assistant(_)),
+                ..
+            } => Some((idx, "assistant")),
+            _ => None,
+        })
+        .collect();
+    let assistant_idx = positions
+        .iter()
+        .find(|(_, k)| *k == "assistant")
+        .map(|(i, _)| *i);
+    let promoted_idx = positions
+        .iter()
+        .find(|(_, k)| *k == "promoted")
+        .map(|(i, _)| *i);
+    assert!(
+        assistant_idx.is_some() && promoted_idx.is_some(),
+        "both assistant response and promoted user message must be persisted: {positions:?}",
+    );
+    assert!(
+        promoted_idx.unwrap() > assistant_idx.unwrap(),
+        "promoted user message MUST come AFTER the in-flight assistant response in session JSONL; got positions {positions:?}",
+    );
+}
+
+/// PermissionCategory::ControlPlaneWrite is added to the enum and defaults to Allow at the
+/// runtime layer. Downstream PRs (Tools-MCP for tools, CLI-TUI for slash commands) plug in
+/// the danger classifier + Prompt path; the runtime stays permissive so adding the category
+/// is a non-breaking infrastructure change.
+#[test]
+fn control_plane_write_category_defaults_to_allow_at_runtime_layer() {
+    use pie_agent_core::{PermissionCategory, PermissionDecision, PermissionPolicy};
+
+    let policy = PermissionPolicy::default_for_coding_agent();
+    // Even with bash-tool name + a normally-dangerous arg, the ControlPlaneWrite category
+    // should fall through to Allow because the runtime policy has no category-specific
+    // classifier wired. Tools-MCP's follow-up PR adds the danger classifier here.
+    let args = serde_json::json!({ "command": "rm -rf /tmp/foo" });
+    match policy.evaluate_with_category(PermissionCategory::ControlPlaneWrite, "bash", &args) {
+        PermissionDecision::Allow => {}
+        other => panic!("ControlPlaneWrite must default to Allow at runtime; got {other:?}"),
+    }
+    // Sanity check the legacy `evaluate` still uses the Tool category (bash classifier)
+    // so backwards compatibility holds.
+    match policy.evaluate("bash", &args) {
+        PermissionDecision::Deny { .. } => {}
+        other => panic!("Tool-category bash danger classifier must still deny; got {other:?}"),
+    }
+}

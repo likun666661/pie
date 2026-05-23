@@ -120,10 +120,17 @@ pub enum HarnessEvent {
     /// 4 KiB). `cost_usd` is `None` in sub-PR 5a because the bare sub-`Agent` has no
     /// `CostTracker` wrapper — the value mirrors the audit's `cost_usd: null`. Sub-PR 5b
     /// or 5c wraps the sub-agent in a mini-`CostTracker` and `cost_usd` will be `Some(f)`.
+    ///
+    /// `details` is the structured sub-agent result envelope populated through marker tools
+    /// (see [`TriggerResultDetailsBuilder`]). Defaults to `serde_json::Value::Null` until a
+    /// sub-agent tool writes through the builder. Authorization for
+    /// [`PromoteAction::PromoteSummaryWhenResultDetailsMatch`] flows exclusively through
+    /// this field — `summary` is display-only and is NEVER consulted by the promotion gate.
     TriggerCompleted {
         trace_id: String,
         summary: Option<String>,
         cost_usd: Option<f64>,
+        details: serde_json::Value,
     },
     /// A sub-agent execution failed (agent loop error, panic-via-spawn-error, or aborted by
     /// [`AgentHarness::abort_trigger`] / [`AgentHarness::abort_all_triggers`]). `reason` is
@@ -131,18 +138,31 @@ pub enum HarnessEvent {
     /// material. The parent `trigger_result` audit entry has been written with
     /// `success: false`.
     TriggerFailed { trace_id: String, reason: String },
-    /// A trigger's `PromoteAction` rendered successfully and a parent-session entry was
-    /// inserted to surface the sub-agent result to the user / LLM. `inserted_entry_id` is
-    /// the id of the appended `Message::User` (pie_ai has no System role today; we use
-    /// User with a `[Trigger ...]` body prefix so the LLM disambiguates trigger-driven
-    /// context from human input). The `trigger_promotion` Custom audit records the same
-    /// id for cross-reference.
+    /// A trigger's `PromoteAction` rendered successfully and the runtime committed to
+    /// surfacing the sub-agent result to the user / LLM. pie_ai has no System role today;
+    /// the inserted entry is a `Message::User` with a `[Trigger ...]` body prefix so the
+    /// LLM disambiguates trigger-driven context from human input.
+    ///
+    /// `inserted_entry_id` semantics depend on the parent agent state at promotion time
+    /// (see also `trigger_promotion.state` in the same-trace audit entry):
+    ///
+    /// - **Idle parent** (`apply_promotion` took the synchronous-append branch):
+    ///   `inserted_entry_id` is the durable id of the appended `Message::User` and
+    ///   matches `trigger_promotion.inserted_entry_id`. Audit `state: "success"`.
+    /// - **Streaming parent** (queued through the loop's follow-up queue to avoid a
+    ///   double-persistence / ordering race): `inserted_entry_id` is an **empty string**
+    ///   because the session entry ID is only known after the loop drains the queue and
+    ///   the session listener writes the entry. Consumers should correlate by `trace_id`
+    ///   in this case. Audit `state: "queued"` and `inserted_entry_id: null` for the
+    ///   matching `trigger_promotion` entry.
     ///
     /// Causality (RFC 1 §5.F): `TriggerCompleted | TriggerFailed` → `TriggerPromoted` for
     /// the same `trace_id` when promotion is configured AND not held for approval.
     TriggerPromoted {
         trace_id: String,
         promote_kind: String,
+        /// See variant rustdoc: durable id for the idle branch; empty for the streaming
+        /// queued branch (consumers join by `trace_id`).
         inserted_entry_id: String,
         template_name: Option<String>,
         redaction_status: String,
@@ -297,10 +317,11 @@ impl TriggerAction {
 
 /// How a completed sub-agent's `trigger_result` should affect the parent session. `None`
 /// leaves the result in audit/TUI only. `PromoteSummaryNow` inserts a templated result into
-/// the parent session immediately. `PromoteSummaryWhenSummaryContains` is the dynamic-rule
-/// path: it promotes only when the sub-agent summary identifies one of the rule ids that
-/// explicitly requested chat promotion. `InjectNextTurn` per the issue #20 amendment is
-/// deferred to sub-PR 6 / RFC 4 work.
+/// the parent session immediately. `PromoteSummaryWhenResultDetailsMatch` is the
+/// dynamic-rule path: promotion is gated on **structured** sub-agent result details, never
+/// on free-form summary text — eliminates the prompt-injection / authorization-channel risk
+/// of the older `PromoteSummaryWhenSummaryContains` variant (still present for transition).
+/// `InjectNextTurn` per the issue #20 amendment is deferred to sub-PR 6 / RFC 4 work.
 #[derive(Clone, Debug, Default)]
 pub enum PromoteAction {
     #[default]
@@ -314,10 +335,112 @@ pub enum PromoteAction {
         /// `template_name` for a registry-style identity, not the body content.
         template_body: Option<String>,
     },
+    /// Deprecated: free-form `summary` substring matching cannot safely gate promotion —
+    /// the sub-agent's natural-language output becomes an authorization channel a custom
+    /// rule action or model paraphrase can manipulate. Prefer
+    /// [`PromoteAction::PromoteSummaryWhenResultDetailsMatch`] which evaluates a
+    /// `PromotionCondition` against structured `trigger_result.details` instead. Kept here
+    /// during the transition; downstream PRs remove it once all callers have migrated.
+    #[deprecated(
+        note = "promotes on free-form summary substring; use PromoteSummaryWhenResultDetailsMatch with structured PromotionCondition::AnyOf instead"
+    )]
     PromoteSummaryWhenSummaryContains {
         template_body: Option<String>,
         required_substrings: Vec<String>,
     },
+    /// Promotion is gated on a [`PromotionCondition`] evaluated against the sub-agent's
+    /// **structured** `trigger_result.details` (populated by the sub-agent via marker tools,
+    /// not by parsing free-form output). Fail-closed: any failure to evaluate the condition
+    /// (pointer missing, value not an array, empty intersection) skips promotion and emits
+    /// a `trigger_promotion` audit entry with `state: "skipped"` and a `reason` field.
+    PromoteSummaryWhenResultDetailsMatch {
+        template_body: Option<String>,
+        condition: PromotionCondition,
+    },
+}
+
+/// Structured condition evaluated against `trigger_result.details` to decide whether a
+/// `PromoteAction::PromoteSummaryWhenResultDetailsMatch` actually fires. Authorization
+/// flows through this condition — never through the sub-agent's free-form `summary` text.
+///
+/// Future variants (e.g. `AllOf`, `KeyEquals`) can be added without breaking existing
+/// callers; the enum is intentionally narrow today to keep the auth surface auditable.
+#[derive(Clone, Debug)]
+pub enum PromotionCondition {
+    /// Resolve `json_pointer` against `details` (RFC 6901). Fires iff the value resolves
+    /// to a JSON array AND that array shares at least one element with `any_of`. Any
+    /// other state (pointer missing, value not an array, empty intersection) returns
+    /// false and is recorded in the `trigger_promotion` audit with a specific `reason`.
+    ///
+    /// Typical use: `json_pointer = "/dynamic_trigger/matched_rule_ids"`, `any_of =
+    /// <list of rule IDs that have promote_to_chat=true AND are currently enabled>`.
+    AnyOf {
+        json_pointer: String,
+        any_of: Vec<String>,
+    },
+}
+
+impl PromotionCondition {
+    /// Evaluate against the sub-agent's structured `details`. Returns the intersection on
+    /// match (so the caller can write `promote_eligible_rule_ids` for audit/UI), or a
+    /// machine-readable skip reason on mismatch.
+    pub fn evaluate(
+        &self,
+        details: &serde_json::Value,
+    ) -> Result<Vec<String>, PromotionConditionSkipReason> {
+        match self {
+            Self::AnyOf {
+                json_pointer,
+                any_of,
+            } => {
+                let Some(value) = details.pointer(json_pointer) else {
+                    return Err(PromotionConditionSkipReason::PointerMissing);
+                };
+                let Some(arr) = value.as_array() else {
+                    return Err(PromotionConditionSkipReason::ValueNotArray);
+                };
+                let matched: Vec<String> = arr
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .filter(|s| any_of.iter().any(|needle| needle == s))
+                    .map(str::to_string)
+                    .collect();
+                if matched.is_empty() {
+                    Err(PromotionConditionSkipReason::EmptyIntersection)
+                } else {
+                    Ok(matched)
+                }
+            }
+        }
+    }
+}
+
+/// Machine-readable reason a [`PromotionCondition`] declined to fire. Surfaces in the
+/// `trigger_promotion` audit's `reason` field as a stable string ID so downstream tools
+/// (CLI `/triggers audit`, automated runbooks) can compare against an enum, not a sentence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PromotionConditionSkipReason {
+    /// `details.pointer(json_pointer)` returned `None`. Usually means the sub-agent did
+    /// not call its marker tool — fail-closed default.
+    PointerMissing,
+    /// Pointer resolved to a non-array value. Sub-agent populated `details` but in the
+    /// wrong shape; treat as a contract violation.
+    ValueNotArray,
+    /// Array exists but no element matches any entry in `any_of`. Sub-agent marked some
+    /// rules but none that are allowlisted for promotion.
+    EmptyIntersection,
+}
+
+impl PromotionConditionSkipReason {
+    /// Stable string identifier for audit / event serialization. Avoid stringifying the
+    /// `Debug` representation — these strings are part of the audit contract.
+    pub fn as_audit_str(self) -> &'static str {
+        match self {
+            Self::PointerMissing => "result_details_missing",
+            Self::ValueNotArray => "result_details_not_array",
+            Self::EmptyIntersection => "no_matching_rule_id",
+        }
+    }
 }
 
 /// Snapshot context passed into [`BeforeTriggerActionHook`]. Hook returns the
@@ -1459,6 +1582,14 @@ async fn run_trigger_action(
     // parent's own listener. Sub-PR 5b/5c will add a sub-harness wrapper or hook the
     // sub-agent's `MessageEnd` events into the parent `CostTracker`. Reporting `0.0`
     // today would lie about a real measurement; `null` honestly says "unknown".
+    //
+    // `details` is the structured sub-agent result envelope per RFC 1 §5.C: marker tools
+    // (`mark_dynamic_rule_matched` and future per-source equivalents) write through the
+    // [`TriggerResultDetailsBuilder`] accumulator while the sub-agent runs; runtime
+    // snapshots the builder here. Until callers wire a builder into the sub-agent, this is
+    // `Null` and any `PromoteAction::PromoteSummaryWhenResultDetailsMatch` evaluation
+    // fails closed with `PromotionConditionSkipReason::PointerMissing` — the safe default.
+    let details_for_promotion: serde_json::Value = serde_json::Value::Null;
     let result_data = serde_json::json!({
         "trace_id": trace_id,
         "branch_id": serde_json::Value::Null,
@@ -1467,6 +1598,7 @@ async fn run_trigger_action(
         "message_count": message_count,
         "cost_usd": serde_json::Value::Null,
         "reason": failure_reason,
+        "details": details_for_promotion,
     });
     let audit_write_result = parent_session
         .append_custom("trigger_result", Some(result_data))
@@ -1508,6 +1640,7 @@ async fn run_trigger_action(
                 // promotion step below consumes `summary` by reference. Combine both.
                 summary: summary.clone(),
                 cost_usd: None,
+                details: details_for_promotion.clone(),
             },
         );
     } else {
@@ -1539,6 +1672,12 @@ async fn run_trigger_action(
         failure_reason.as_deref(),
         &action.promote,
         action.promote_requires_approval,
+        // Sub-agent result details. Populated via marker tools that write through the
+        // [`TriggerResultDetailsBuilder`] accumulator (sub-PR for marker-tool wiring lands
+        // separately). Until that wires in, this stays `Null` and any caller using
+        // `PromoteAction::PromoteSummaryWhenResultDetailsMatch` will fail closed with
+        // `PromotionConditionSkipReason::PointerMissing` — the safe default.
+        &details_for_promotion,
     )
     .await;
 
@@ -1770,16 +1909,17 @@ async fn apply_promotion(
     _failure_reason: Option<&str>,
     promote: &PromoteAction,
     require_approval: bool,
+    details: &serde_json::Value,
 ) {
-    if summary.as_deref().map(str::trim) == Some("no dynamic trigger rule matched") {
-        return;
-    }
     // Extract the inline template body (if any). v1 does not look up named templates from
     // any registry; that lands in sub-PR 6 / RFC 4 rule engine work. The body is what we
     // render against — never persisted as `template_name` in the audit.
-    let template_body_arg: Option<String> = match promote {
+    let (template_body_arg, promote_kind): (Option<String>, &'static str) = match promote {
         PromoteAction::None => return, // most common path; nothing else to do
-        PromoteAction::PromoteSummaryNow { template_body } => template_body.clone(),
+        PromoteAction::PromoteSummaryNow { template_body } => {
+            (template_body.clone(), "promote_summary_now")
+        }
+        #[allow(deprecated)]
         PromoteAction::PromoteSummaryWhenSummaryContains {
             template_body,
             required_substrings,
@@ -1791,10 +1931,44 @@ async fn apply_promotion(
             {
                 return;
             }
-            template_body.clone()
+            (template_body.clone(), "promote_summary_now")
+        }
+        PromoteAction::PromoteSummaryWhenResultDetailsMatch {
+            template_body,
+            condition,
+        } => {
+            // Authorization gate. The sub-agent's `summary` is NEVER consulted — promotion
+            // fires only when the structured `details` blob satisfies `condition`. Any
+            // failure (pointer missing, value not an array, empty intersection) emits a
+            // `trigger_promotion { state: "skipped", reason }` audit and returns without
+            // touching the parent transcript.
+            match condition.evaluate(details) {
+                Ok(_matched) => (
+                    template_body.clone(),
+                    "promote_summary_when_result_details_match",
+                ),
+                Err(reason) => {
+                    let audit_data = serde_json::json!({
+                        "state": "skipped",
+                        "trace_id": trace_id,
+                        "promote_kind": "promote_summary_when_result_details_match",
+                        "reason": reason.as_audit_str(),
+                        "template_name": serde_json::Value::Null,
+                        "template_hash": serde_json::Value::Null,
+                        "inserted_entry_id": serde_json::Value::Null,
+                        "rule_id": serde_json::Value::Null,
+                        "redaction_status": "skipped",
+                        "dedup_collapsed": false,
+                        "prefix_injected": false,
+                    });
+                    let _ = parent_session
+                        .append_custom("trigger_promotion", Some(audit_data))
+                        .await;
+                    return;
+                }
+            }
         }
     };
-    let promote_kind = "promote_summary_now";
 
     // Build the sealed allowlisted template context once. Anything not in here is unknown
     // to the renderer; anything explicitly forbidden fails before substitution.
@@ -1940,44 +2114,76 @@ async fn apply_promotion(
         content: pie_ai::UserContent::Text(final_body),
         timestamp: chrono::Utc::now().timestamp_millis(),
     }));
-    let inserted_entry_id = match parent_session.append_message(user_message.clone()).await {
-        Ok(id) => id,
-        Err(e) => {
-            emit_from_listeners(
-                listeners,
-                HarnessEvent::PersistenceError {
-                    context: "trigger_promotion".into(),
-                    message: format!("promotion message append failed: {:?}", e.code),
-                },
-            );
-            // Audit the failure so jsonl-only readers know promotion attempted but was lost.
-            let audit_data = serde_json::json!({
-                "state": "failed",
-                "trace_id": trace_id,
-                "promote_kind": promote_kind,
-                "template_name": template_name,
-                "template_hash": template_hash,
-                "inserted_entry_id": serde_json::Value::Null,
-                "rule_id": serde_json::Value::Null,
-                "redaction_status": "render_error",
-                "dedup_collapsed": false,
-                "prefix_injected": prefix_injected,
-            });
-            let _ = parent_session
-                .append_custom("trigger_promotion", Some(audit_data))
-                .await;
-            return;
-        }
+
+    // Single persistence path. The promoted message must land in the session JSONL exactly
+    // once, with deterministic ordering relative to any in-flight assistant response. Two
+    // disjoint branches based on parent loop state:
+    //
+    // - **Streaming**: parent has an active prompt. Hand the message to the loop's
+    //   follow-up queue. The loop drains it at the next turn boundary (after the in-flight
+    //   assistant response has emitted its `MessageEnd` and been persisted by the session
+    //   listener), pushes it into `state.messages`, and emits a `MessageEnd` whose session
+    //   listener writes the single canonical session entry. Order in JSONL: assistant
+    //   response → user_promoted, matching what the model actually saw. We do NOT call
+    //   `parent_session.append_message` here — that would double-persist and land in the
+    //   wrong order. Audit captures the queued state; `inserted_entry_id` is only known
+    //   after the loop drains, so it's `Null` here and correlated via `trace_id`.
+    //
+    // - **Idle**: no active loop, no listener race. Synchronously
+    //   `parent_session.append_message` (single write) then push to `state.messages` so
+    //   the user's next `prompt()` / `continue_()` sees the promotion without an explicit
+    //   rehydrate. Loop isn't running, so no `MessageEnd` fires for this message → no
+    //   duplicate listener write.
+    let queued_for_followup = parent_agent.is_streaming();
+    let (audit_state, inserted_entry_id_value, inserted_entry_id_str) = if queued_for_followup {
+        parent_agent.enqueue_follow_up(user_message);
+        (
+            "queued",
+            serde_json::Value::Null,
+            String::new(), // event field is set; TUI / /triggers audit join by trace_id
+        )
+    } else {
+        let id = match parent_session.append_message(user_message.clone()).await {
+            Ok(id) => id,
+            Err(e) => {
+                emit_from_listeners(
+                    listeners,
+                    HarnessEvent::PersistenceError {
+                        context: "trigger_promotion".into(),
+                        message: format!("promotion message append failed: {:?}", e.code),
+                    },
+                );
+                // Audit the failure so jsonl-only readers know promotion attempted but
+                // was lost.
+                let audit_data = serde_json::json!({
+                    "state": "failed",
+                    "trace_id": trace_id,
+                    "promote_kind": promote_kind,
+                    "template_name": template_name,
+                    "template_hash": template_hash,
+                    "inserted_entry_id": serde_json::Value::Null,
+                    "rule_id": serde_json::Value::Null,
+                    "redaction_status": "render_error",
+                    "dedup_collapsed": false,
+                    "prefix_injected": prefix_injected,
+                });
+                let _ = parent_session
+                    .append_custom("trigger_promotion", Some(audit_data))
+                    .await;
+                return;
+            }
+        };
+        parent_agent.state().messages.push(user_message);
+        ("success", serde_json::Value::String(id.clone()), id)
     };
-    parent_agent.state().messages.push(user_message);
 
     let audit_data = serde_json::json!({
-        "state": "success",
+        "state": audit_state,
         "trace_id": trace_id,
         "promote_kind": promote_kind,
         "template_name": template_name,
         "template_hash": template_hash,
-        "inserted_entry_id": inserted_entry_id,
+        "inserted_entry_id": inserted_entry_id_value,
         "rule_id": serde_json::Value::Null,
         "redaction_status": redaction_status,
         "dedup_collapsed": false,
@@ -1991,7 +2197,10 @@ async fn apply_promotion(
             listeners,
             HarnessEvent::PersistenceError {
                 context: "trigger_promotion".into(),
-                message: format!("trigger_promotion (success) append failed: {:?}", e.code),
+                message: format!(
+                    "trigger_promotion ({audit_state}) append failed: {:?}",
+                    e.code
+                ),
             },
         );
     }
@@ -2000,7 +2209,7 @@ async fn apply_promotion(
         HarnessEvent::TriggerPromoted {
             trace_id: trace_id.to_string(),
             promote_kind: promote_kind.into(),
-            inserted_entry_id,
+            inserted_entry_id: inserted_entry_id_str,
             template_name,
             redaction_status: redaction_status.into(),
         },

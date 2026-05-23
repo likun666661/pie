@@ -216,6 +216,38 @@ async fn dispatch_unknown_command_returns_error_outcome() {
 }
 
 #[tokio::test]
+async fn dispatch_triggers_status_is_read_only_and_available() {
+    // Serialize with the other trigger tests: they share the process-global rule registry, so
+    // an unlocked `clear_for_tests()` here can wipe another test's rule mid-run.
+    let _guard = DYNAMIC_TRIGGER_LOCK.lock().unwrap();
+    triggers::global_registry().clear_for_tests();
+
+    let storage = Arc::new(MemorySessionStorage::new());
+    let session = Session::new(storage as Arc<dyn SessionStorage>);
+    let mut opts = AgentHarnessOptions::new(faux_model(), session.clone());
+    opts.tools = vec![Arc::new(triggers::NewTriggerTool) as Arc<dyn AgentTool>];
+    opts.stream_fn = Some(new_trigger_extraction_stream());
+    let harness = Arc::new(AgentHarness::new(opts));
+
+    let registry = commands::Registry::with_builtins();
+    let cwd = std::env::current_dir().unwrap();
+    let ctx = commands::CommandCtx {
+        harness: &harness,
+        session_id: "test",
+        log_path: None,
+        tool_count: 0,
+        cwd: &cwd,
+    };
+
+    let outcome = commands::dispatch("/triggers", &registry, &ctx).await;
+    assert!(matches!(outcome, commands::CommandOutcome::Handled));
+    assert!(
+        session.entries().await.unwrap().is_empty(),
+        "/triggers status must not mutate the session"
+    );
+}
+
+#[tokio::test]
 async fn dispatch_template_returns_repl_owned_agent_work() {
     let storage = Arc::new(MemorySessionStorage::new());
     let session = Session::new(storage as Arc<dyn SessionStorage>);
@@ -241,19 +273,15 @@ async fn dispatch_template_returns_repl_owned_agent_work() {
     }
     assert!(
         session.entries().await.unwrap().is_empty(),
-        "/template dispatch should not run the agent directly; the REPL owns Ctrl-C abort handling"
+        "/template dispatch should not run the agent directly; the TUI owns Ctrl-C abort handling"
     );
 }
 
 #[tokio::test]
-async fn dispatch_triggers_status_is_read_only_and_available() {
-    triggers::global_registry().clear_for_tests();
-
+async fn dispatch_compact_returns_repl_owned_agent_work() {
     let storage = Arc::new(MemorySessionStorage::new());
     let session = Session::new(storage as Arc<dyn SessionStorage>);
-    let mut opts = AgentHarnessOptions::new(faux_model(), session.clone());
-    opts.tools = vec![Arc::new(triggers::NewTriggerTool) as Arc<dyn AgentTool>];
-    opts.stream_fn = Some(new_trigger_extraction_stream());
+    let opts = AgentHarnessOptions::new(faux_model(), session.clone());
     let harness = Arc::new(AgentHarness::new(opts));
 
     let registry = commands::Registry::with_builtins();
@@ -265,12 +293,16 @@ async fn dispatch_triggers_status_is_read_only_and_available() {
         tool_count: 0,
         cwd: &cwd,
     };
-
-    let outcome = commands::dispatch("/triggers", &registry, &ctx).await;
-    assert!(matches!(outcome, commands::CommandOutcome::Handled));
+    let outcome = commands::dispatch("/compact keep decisions", &registry, &ctx).await;
+    match outcome {
+        commands::CommandOutcome::RunCompaction { custom } => {
+            assert_eq!(custom.as_deref(), Some("keep decisions"));
+        }
+        other => panic!("expected RunCompaction outcome, got {other:?}"),
+    }
     assert!(
         session.entries().await.unwrap().is_empty(),
-        "/triggers status must not mutate the session"
+        "/compact dispatch should not run compaction directly; the TUI owns Ctrl-C abort handling"
     );
 }
 
@@ -307,7 +339,7 @@ async fn dispatch_new_trigger_registers_dynamic_rule() {
             prompt,
             error_context,
         } => {
-            assert_eq!(error_context, "create trigger");
+            assert_eq!(error_context, "create trigger: ");
             assert!(prompt.contains(condition));
             assert!(prompt.contains(action));
             prompt
@@ -316,7 +348,7 @@ async fn dispatch_new_trigger_registers_dynamic_rule() {
     };
     assert!(
         triggers::global_registry().list().is_empty(),
-        "/new-trigger dispatch should not run the agent directly; the REPL wraps the returned prompt with Ctrl-C abort handling"
+        "/new-trigger dispatch should not run the agent directly; the TUI owns Ctrl-C abort handling"
     );
 
     harness.prompt(agent_prompt).await.unwrap();

@@ -77,16 +77,20 @@ fn map_agent_event(event: &AgentEvent) -> Vec<FeedUpdate> {
 
 /// Build the harness listener for trigger lifecycle lines. Keeps the same "stay quiet unless a
 /// dynamic periodic check actually matched" behavior the old renderer had.
-pub fn harness_listener(tx: UnboundedSender<FeedUpdate>) -> HarnessListener {
+pub fn harness_listener(tx: UnboundedSender<FeedUpdate>, debug: bool) -> HarnessListener {
     let quiet: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
     Arc::new(move |event| {
-        if let Some(update) = map_harness_event(&event, &quiet) {
+        if let Some(update) = map_harness_event(&event, &quiet, debug) {
             let _ = tx.send(update);
         }
     })
 }
 
-fn map_harness_event(event: &HarnessEvent, quiet: &Mutex<HashSet<String>>) -> Option<FeedUpdate> {
+fn map_harness_event(
+    event: &HarnessEvent,
+    quiet: &Mutex<HashSet<String>>,
+    debug: bool,
+) -> Option<FeedUpdate> {
     match event {
         HarnessEvent::TriggerHandlingStart {
             trace_id,
@@ -95,17 +99,18 @@ fn map_harness_event(event: &HarnessEvent, quiet: &Mutex<HashSet<String>>) -> Op
             event_label,
             ..
         } => {
-            if source_label == "local:dynamic" && event_label == "dynamic periodic check" {
+            if !debug && source_label == "local:dynamic" && event_label == "dynamic periodic check"
+            {
                 quiet.lock().insert(trace_id.clone());
                 return None;
             }
             Some(FeedUpdate::Plain {
                 text: format!(
                     "[trigger fired] trace={} source={} kind={} event={}",
-                    truncate_chars(trace_id, 24),
-                    truncate_chars(source_label, 48),
+                    debug_text(debug, trace_id, 24),
+                    debug_text(debug, source_label, 48),
                     source_kind_label(*source_kind),
-                    truncate_chars(event_label, 64)
+                    debug_text(debug, event_label, 64)
                 ),
                 level: Level::System,
             })
@@ -123,7 +128,7 @@ fn map_harness_event(event: &HarnessEvent, quiet: &Mutex<HashSet<String>>) -> Op
                     text: format!(
                         "[trigger {}] trace={}",
                         trigger_state_label(*state),
-                        truncate_chars(trace_id, 24)
+                        debug_text(debug, trace_id, 24)
                     ),
                     level: trigger_state_level(*state),
                 })
@@ -135,13 +140,13 @@ fn map_harness_event(event: &HarnessEvent, quiet: &Mutex<HashSet<String>>) -> Op
         } => {
             let summary = summary.as_deref().unwrap_or("completed");
             let was_quiet = quiet.lock().remove(trace_id);
-            if was_quiet && summary.trim() == "no dynamic trigger rule matched" {
+            if !debug && was_quiet && summary.trim() == "no dynamic trigger rule matched" {
                 return None;
             }
             Some(FeedUpdate::Plain {
                 text: format!(
                     "[trigger completed] trace={} {}",
-                    truncate_chars(trace_id, 24),
+                    debug_text(debug, trace_id, 24),
                     summary
                 ),
                 level: Level::Note,
@@ -152,8 +157,8 @@ fn map_harness_event(event: &HarnessEvent, quiet: &Mutex<HashSet<String>>) -> Op
             Some(FeedUpdate::Plain {
                 text: format!(
                     "[trigger failed] trace={} {}",
-                    truncate_chars(trace_id, 24),
-                    truncate_chars(reason, 180)
+                    debug_text(debug, trace_id, 24),
+                    debug_text(debug, reason, 180)
                 ),
                 level: Level::Error,
             })
@@ -164,15 +169,16 @@ fn map_harness_event(event: &HarnessEvent, quiet: &Mutex<HashSet<String>>) -> Op
             event_label,
             prompt_preview,
         } => {
-            if source_label == "local:dynamic" && event_label == "dynamic periodic check" {
+            if !debug && source_label == "local:dynamic" && event_label == "dynamic periodic check"
+            {
                 quiet.lock().insert(trace_id.clone());
                 return None;
             }
             Some(FeedUpdate::Plain {
                 text: format!(
                     "[trigger running] trace={} {}",
-                    truncate_chars(trace_id, 24),
-                    truncate_chars(prompt_preview, 120)
+                    debug_text(debug, trace_id, 24),
+                    debug_text(debug, prompt_preview, 120)
                 ),
                 level: Level::System,
             })
@@ -181,10 +187,18 @@ fn map_harness_event(event: &HarnessEvent, quiet: &Mutex<HashSet<String>>) -> Op
     }
 }
 
+fn debug_text(debug: bool, s: &str, max_chars: usize) -> String {
+    if debug {
+        s.to_string()
+    } else {
+        truncate_chars(s, max_chars)
+    }
+}
+
 #[cfg(test)]
 fn map_harness_event_for_test(event: &HarnessEvent) -> Option<FeedUpdate> {
     let quiet = Mutex::new(HashSet::new());
-    map_harness_event(event, &quiet)
+    map_harness_event(event, &quiet, false)
 }
 
 fn trigger_state_label(state: TriggerState) -> &'static str {
@@ -314,6 +328,30 @@ mod tests {
         assert!(text.contains("[trigger fired] trace=trace-start"));
         assert!(text.contains("source=mcp:github"));
         assert!(text.contains("event=pr.merged"));
+    }
+
+    #[test]
+    fn debug_mode_renders_dynamic_periodic_trigger_lines() {
+        let quiet = Mutex::new(HashSet::new());
+        let update = map_harness_event(
+            &HarnessEvent::TriggerHandlingStart {
+                idempotency_key: "idem-key".into(),
+                source_kind: pie_agent_core::SourceKind::Local,
+                source_label: "local:dynamic".into(),
+                event_label: "dynamic periodic check".into(),
+                trace_id: "trace-debug".into(),
+            },
+            &quiet,
+            true,
+        )
+        .expect("debug mode should render dynamic periodic checks");
+
+        let FeedUpdate::Plain { text, level } = update else {
+            panic!("expected plain update");
+        };
+        assert_eq!(level, Level::System);
+        assert!(text.contains("[trigger fired] trace=trace-debug"));
+        assert!(text.contains("source=local:dynamic"));
     }
 
     #[test]

@@ -5,8 +5,9 @@
 
 CARGO ?= cargo
 BIN   ?= pie
-PIE_BINARY ?= target/debug/$(BIN)
-PIE_RELEASE_BINARY ?= target/release/$(BIN)
+OUTPUT_DIR ?= output
+PIE_BINARY ?= $(OUTPUT_DIR)/debug/$(BIN)
+PIE_RELEASE_BINARY ?= $(OUTPUT_DIR)/release/$(BIN)
 
 .DEFAULT_GOAL := help
 
@@ -19,12 +20,12 @@ help: ## show this help
 # --- build ------------------------------------------------------------------
 
 .PHONY: build
-build: ## cargo build (dev profile, all workspace members)
-	$(CARGO) build --workspace
+build: ## cargo build (dev profile, all workspace members; artifacts in $(OUTPUT_DIR))
+	$(CARGO) build --workspace --target-dir $(OUTPUT_DIR)
 
 .PHONY: release
 release: ## cargo build --release (optimized binary at $(PIE_RELEASE_BINARY))
-	$(CARGO) build --workspace --release
+	$(CARGO) build --workspace --release --target-dir $(OUTPUT_DIR)
 
 .PHONY: check
 check: ## fast type-check without producing artifacts

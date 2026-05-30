@@ -972,37 +972,48 @@ export class HubApp {
   }
 
   private async registerUser(args: Record<string, unknown>): Promise<unknown> {
-    ensureOnly(args, ["username", "password", "namespace"]);
-    const username = normalizeName(stringField(args, "username"), "username");
-    const namespace = normalizeName(optionalString(args.namespace, "namespace") ?? username, "namespace");
-    const password = stringField(args, "password");
-    if (password.length < 12) {
-      throw ERR.schemaInvalid(["password must be at least 12 characters"]);
+    let phase = "validate";
+    try {
+      ensureOnly(args, ["username", "password", "namespace"]);
+      const username = normalizeName(stringField(args, "username"), "username");
+      const namespace = normalizeName(optionalString(args.namespace, "namespace") ?? username, "namespace");
+      const password = stringField(args, "password");
+      if (password.length < 12) {
+        throw ERR.schemaInvalid(["password must be at least 12 characters"]);
+      }
+      phase = "lookup_username";
+      if (await this.store.getUserByUsername(username)) {
+        throw ERR.schemaInvalid(["username already exists"]);
+      }
+      phase = "lookup_namespace";
+      if (await this.store.getUserByNamespace(namespace)) {
+        throw ERR.schemaInvalid(["namespace already exists"]);
+      }
+      phase = "hash_password";
+      const salt = randomSecret(18);
+      const passwordHash = await pbkdf2Hash(password, salt);
+      const user: UserRecord = {
+        user_id: crypto.randomUUID(),
+        username,
+        namespace,
+        password_hash: passwordHash,
+        password_salt: salt,
+        created_at: nowIso(),
+      };
+      phase = "insert_user";
+      await this.store.createUser(user);
+      phase = "issue_session";
+      const sessionToken = await this.issueHumanSession(user);
+      return {
+        user_id: user.user_id,
+        username: user.username,
+        namespace: user.namespace,
+        session_token: sessionToken,
+      };
+    } catch (error) {
+      if (error instanceof PublicError) throw error;
+      throw new PublicError(-32603, "internal", "Hub is temporarily unavailable. Retry with backoff.", { phase });
     }
-    if (await this.store.getUserByUsername(username)) {
-      throw ERR.schemaInvalid(["username already exists"]);
-    }
-    if (await this.store.getUserByNamespace(namespace)) {
-      throw ERR.schemaInvalid(["namespace already exists"]);
-    }
-    const salt = randomSecret(18);
-    const passwordHash = await pbkdf2Hash(password, salt);
-    const user: UserRecord = {
-      user_id: crypto.randomUUID(),
-      username,
-      namespace,
-      password_hash: passwordHash,
-      password_salt: salt,
-      created_at: nowIso(),
-    };
-    await this.store.createUser(user);
-    const sessionToken = await this.issueHumanSession(user);
-    return {
-      user_id: user.user_id,
-      username: user.username,
-      namespace: user.namespace,
-      session_token: sessionToken,
-    };
   }
 
   private async loginUser(args: Record<string, unknown>): Promise<unknown> {

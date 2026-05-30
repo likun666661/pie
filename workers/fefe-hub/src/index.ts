@@ -179,7 +179,7 @@ interface Store {
 }
 
 interface Mailbox {
-  connect(agentId: string): Response;
+  connect(agentId: string): Response | Promise<Response>;
   push(agentId: string, notification: NotificationRecord): Promise<boolean>;
 }
 
@@ -640,34 +640,10 @@ export class MemoryStore implements Store {
 class DurableMailbox implements Mailbox {
   constructor(private readonly namespace: DurableObjectNamespace) {}
 
-  connect(agentId: string): Response {
+  async connect(agentId: string): Promise<Response> {
     const id = this.namespace.idFromName(agentId);
     const stub = this.namespace.get(id);
-    return new Response(
-      new ReadableStream({
-        async start(controller) {
-          const response = await stub.fetch("https://mailbox/connect", { method: "GET" });
-          if (!response.body) {
-            controller.close();
-            return;
-          }
-          await response.body.pipeTo(
-            new WritableStream({
-              write(chunk) {
-                controller.enqueue(chunk);
-              },
-              close() {
-                controller.close();
-              },
-              abort(reason) {
-                controller.error(reason);
-              },
-            }),
-          );
-        },
-      }),
-      sseHeaders(),
-    );
+    return stub.fetch("https://mailbox/connect", { method: "GET" });
   }
 
   async push(agentId: string, notification: NotificationRecord): Promise<boolean> {

@@ -19,6 +19,8 @@ mod extensions;
 mod goal;
 mod history;
 mod hooks;
+#[allow(dead_code)]
+mod hub_auth;
 mod images;
 mod local_models;
 mod logging;

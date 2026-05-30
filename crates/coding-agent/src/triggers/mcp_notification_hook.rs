@@ -180,6 +180,7 @@ impl NotificationHook for McpNotificationHook {
 fn map_notification(server_name: &str, n: &McpServerNotification) -> Option<Trigger> {
     let (idempotency_key, replacement_policy) = idempotency_for(server_name, &n.method, &n.params)?;
     let payload_summary = render_summary(&n.method, &n.params);
+    let payload = first_contact_prompt_payload(&n.method, &n.params);
     Some(Trigger {
         source: TriggerSource::Mcp {
             server_name: server_name.to_string(),
@@ -190,7 +191,7 @@ fn map_notification(server_name: &str, n: &McpServerNotification) -> Option<Trig
         event_label: n.method.clone(),
         payload_visibility: PayloadVisibility::Local,
         payload_summary,
-        payload: None, // MCP push payload stays local per §3.2.2 default.
+        payload,
         idempotency_key,
         replacement_policy,
         trace_id: Uuid::new_v4().to_string(),
@@ -205,6 +206,128 @@ fn map_notification(server_name: &str, n: &McpServerNotification) -> Option<Trig
         },
         received_at: Utc::now(),
     })
+}
+
+fn first_contact_prompt_payload(
+    method: &str,
+    params: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    if method != "notifications/agent_message" {
+        return None;
+    }
+    let receiver_agent_id = json_uuid(params, &["_meta", "receiver_agent_id"])?;
+    let sender_agent_id = json_uuid(params, &["_meta", "sender_agent_id"])
+        .or_else(|| json_uuid(params, &["agent_id"]))?;
+    let action_class = json_action_class(params, &["_meta", "action_class"])
+        .unwrap_or_else(|| "notification".into());
+    let sender_mention = json_string(params, &["sender"])
+        .and_then(safe_mention)
+        .unwrap_or_else(|| "@unknown@hub".into());
+    let payload_summary =
+        json_string(params, &["_meta", "pie_summary"]).map(|value| safe_display(value, 200));
+    let payload_visibility = json_string(params, &["payload_visibility"])
+        .and_then(|value| match value {
+            "Local" | "Shared" | "Redacted" => Some(value),
+            _ => None,
+        })
+        .unwrap_or("Local");
+
+    Some(serde_json::json!({
+        "_meta": {
+            "receiver_agent_id": receiver_agent_id,
+            "sender_agent_id": sender_agent_id,
+            "action_class": action_class,
+        },
+        "sender": {
+            "mention": sender_mention,
+            "handle": json_string(params, &["handle"]).map(|value| safe_display(value, 64)),
+            "namespace": json_string(params, &["namespace"]).map(|value| safe_display(value, 64)),
+        },
+        "payload_summary": payload_summary,
+        "payload_visibility": payload_visibility,
+    }))
+}
+
+fn json_uuid(value: &serde_json::Value, path: &[&str]) -> Option<String> {
+    let candidate = json_string(value, path)?;
+    uuid::Uuid::parse_str(candidate).ok()?;
+    Some(candidate.to_string())
+}
+
+fn json_action_class(value: &serde_json::Value, path: &[&str]) -> Option<String> {
+    let candidate = json_string(value, path)?;
+    (candidate == "notification").then_some(candidate.to_string())
+}
+
+fn json_string<'a>(value: &'a serde_json::Value, path: &[&str]) -> Option<&'a str> {
+    let mut current = value;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    current.as_str()
+}
+
+fn safe_mention(value: &str) -> Option<String> {
+    let safe = safe_display(value, 96);
+    parse_safe_mention(&safe)
+}
+
+fn safe_display(value: &str, cap: usize) -> String {
+    let redacted = redact_notification_text(value).replace('\n', " ");
+    truncate_chars(&redacted, cap)
+}
+
+fn parse_safe_mention(input: &str) -> Option<String> {
+    let rest = input.trim().strip_prefix('@')?;
+    let (handle, namespace) = rest.split_once('@')?;
+    if handle.is_empty() || namespace.is_empty() || namespace.contains('@') {
+        return None;
+    }
+    if !(2..=32).contains(&handle.len()) || !(2..=32).contains(&namespace.len()) {
+        return None;
+    }
+    if !is_mention_part(handle) || !is_mention_part(namespace) {
+        return None;
+    }
+    Some(format!("@{handle}@{namespace}"))
+}
+
+fn is_mention_part(value: &str) -> bool {
+    value
+        .chars()
+        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '-' | '_'))
+}
+
+fn redact_notification_text(value: &str) -> String {
+    value
+        .split_whitespace()
+        .map(|part| {
+            let lower = part.to_ascii_lowercase();
+            if lower.starts_with("hub_agent_")
+                || lower.starts_with("hub_hs_")
+                || lower.starts_with("sk-")
+                || lower.contains("bearer")
+                || lower.contains("token")
+            {
+                "[redacted]"
+            } else {
+                part
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn truncate_chars(value: &str, cap: usize) -> String {
+    if value.chars().count() <= cap {
+        return value.to_string();
+    }
+    let mut out = value
+        .chars()
+        .take(cap.saturating_sub(1))
+        .collect::<String>();
+    out.push('…');
+    out
 }
 
 /// Derive `(idempotency_key, replacement_policy)` for a given method + params per RFC 1
@@ -754,6 +877,63 @@ mod tests {
         );
         drop(tx);
         let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn hub_agent_message_carries_only_first_contact_binding_envelope() {
+        let trigger = map_notification(
+            "pie-hub",
+            &note(
+                "notifications/agent_message",
+                json!({
+                    "notification_id": "note-1",
+                    "agent_id": "22222222-2222-4222-8222-222222222222",
+                    "handle": "alice",
+                    "namespace": "dongxu",
+                    "sender": "@alice@dongxu",
+                    "payload_visibility": "Local",
+                    "payload": {
+                        "secret": "hub_agent_secret_should_not_leave_local_payload"
+                    },
+                    "_meta": {
+                        "pie_dedup_key": "note-1",
+                        "pie_summary": "hello from alice",
+                        "receiver_agent_id": "11111111-1111-4111-8111-111111111111",
+                        "sender_agent_id": "22222222-2222-4222-8222-222222222222",
+                        "action_class": "notification"
+                    }
+                }),
+            ),
+        )
+        .expect("hub notification should map");
+
+        assert_eq!(trigger.payload_visibility, PayloadVisibility::Local);
+        let payload = trigger.payload.expect("bounded envelope payload");
+        assert_eq!(
+            payload
+                .pointer("/_meta/receiver_agent_id")
+                .and_then(|v| v.as_str()),
+            Some("11111111-1111-4111-8111-111111111111")
+        );
+        assert_eq!(
+            payload
+                .pointer("/_meta/sender_agent_id")
+                .and_then(|v| v.as_str()),
+            Some("22222222-2222-4222-8222-222222222222")
+        );
+        assert_eq!(
+            payload
+                .pointer("/_meta/action_class")
+                .and_then(|v| v.as_str()),
+            Some("notification")
+        );
+        assert_eq!(
+            payload.pointer("/sender/mention").and_then(|v| v.as_str()),
+            Some("@alice@dongxu")
+        );
+        let rendered = payload.to_string();
+        assert!(!rendered.contains("hub_agent_secret_should_not_leave_local_payload"));
+        assert!(payload.get("payload").is_none(), "{rendered}");
     }
 
     /// Known `resources/updated` keeps the `uri` in the summary — `uri` is part of the

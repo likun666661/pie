@@ -451,6 +451,7 @@ async fn run_repl(mut cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo)
         ));
         None
     };
+    opts.before_trigger = Some(trigger_prompt::hub_trust_gate_hook());
     // Triggers from MCP servers configured with `inject_summary` / `inject_and_run` bypass
     // the sub-agent and inject their pushed summary into chat (the latter also runs one
     // model turn in the parent context); everything else falls through to the dynamic-rule

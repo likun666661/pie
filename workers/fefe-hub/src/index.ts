@@ -1719,6 +1719,9 @@ function toSseEvent(notification: NotificationRecord): string {
             _meta: {
               pie_dedup_key: notification.notification_id,
               pie_summary: notification.summary,
+              receiver_agent_id: notification.receiver_agent_id,
+              sender_agent_id: notification.sender_agent_id,
+              action_class: "notification",
             },
           },
   };

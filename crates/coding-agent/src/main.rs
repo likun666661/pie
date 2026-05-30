@@ -127,6 +127,16 @@ struct Cli {
     #[arg(long)]
     yes: bool,
 
+    /// Hidden e2e driver for hub first-contact decisions. This lets live tests exercise the
+    /// runtime prompt path without brittle PTY key timing.
+    #[arg(
+        long = "hub-first-contact-decision",
+        hide = true,
+        value_name = "accept|always|block|skip",
+        value_parser = clap::builder::PossibleValuesParser::new(["accept", "always", "block", "skip"])
+    )]
+    hub_first_contact_decision: Option<String>,
+
     /// Run the local browser UI instead of the terminal UI. Defaults to loopback-only.
     #[arg(long)]
     web: bool,
@@ -436,10 +446,23 @@ async fn run_repl(mut cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo)
         ));
         None
     };
+    let hub_first_contact_driver = cli
+        .hub_first_contact_decision
+        .as_deref()
+        .map(|value| {
+            trigger_prompt::TriggerPromptDriverDecision::parse(value).map_err(anyhow::Error::msg)
+        })
+        .transpose()?;
     let trigger_prompt_rx = if interactive_tui {
         let (hook, rx) = trigger_prompt::interactive_hook(session.clone());
         opts.on_trigger_prompt = Some(hook);
         Some(rx)
+    } else if let Some(decision) = hub_first_contact_driver {
+        opts.on_trigger_prompt = Some(trigger_prompt::decision_driver_hook(
+            session.clone(),
+            decision,
+        ));
+        None
     } else if cli.web {
         opts.on_trigger_prompt = Some(trigger_prompt::deny_hook(
             "hub first-contact prompts are not available in the Web UI yet; run pie in the terminal UI to review this notification",
@@ -557,6 +580,7 @@ async fn run_repl(mut cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo)
         main_run_rx,
         control_plane_prompt_rx,
         trigger_prompt_rx,
+        trigger_prompt_driver: hub_first_contact_driver,
         panel_status: ui::PanelStatus {
             mcp_servers: mcp.client_count,
             mcp_tools: mcp_tool_count,
@@ -1000,6 +1024,7 @@ mod tests {
             trigger_poll_secs: None,
             debug: false,
             yes: false,
+            hub_first_contact_decision: None,
             web: false,
             web_host: "127.0.0.1".into(),
             web_port: 0,

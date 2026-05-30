@@ -23,6 +23,51 @@ pub(crate) struct UiTriggerPromptResolution {
     pub(crate) trust_decision: Option<TriggerTrustDecision>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TriggerPromptDriverDecision {
+    AcceptOnce,
+    Always,
+    Block,
+    Skip,
+}
+
+impl TriggerPromptDriverDecision {
+    pub(crate) fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "accept" => Ok(Self::AcceptOnce),
+            "always" => Ok(Self::Always),
+            "block" => Ok(Self::Block),
+            "skip" => Ok(Self::Skip),
+            _ => Err("expected accept, always, block, or skip".into()),
+        }
+    }
+
+    pub(crate) fn resolution(self) -> UiTriggerPromptResolution {
+        match self {
+            Self::AcceptOnce => UiTriggerPromptResolution {
+                decision: TriggerPromptDecision::Allow,
+                trust_decision: None,
+            },
+            Self::Always => UiTriggerPromptResolution {
+                decision: TriggerPromptDecision::Allow,
+                trust_decision: Some(TriggerTrustDecision::Always),
+            },
+            Self::Block => UiTriggerPromptResolution {
+                decision: TriggerPromptDecision::Deny {
+                    reason: Some("blocked by user".into()),
+                },
+                trust_decision: Some(TriggerTrustDecision::Block),
+            },
+            Self::Skip => UiTriggerPromptResolution {
+                decision: TriggerPromptDecision::Timeout {
+                    reason: Some("deferred_by_user".into()),
+                },
+                trust_decision: None,
+            },
+        }
+    }
+}
+
 pub(crate) struct UiTriggerPrompt {
     pub(crate) request: TriggerPromptRequest,
     pub(crate) responder: oneshot::Sender<UiTriggerPromptResolution>,
@@ -97,6 +142,55 @@ pub(crate) fn deny_hook(reason: &'static str) -> OnTriggerPromptHook {
                 TriggerPromptDecision::Deny {
                     reason: Some(reason.to_string()),
                 }
+            })
+        },
+    )
+}
+
+pub(crate) fn decision_driver_hook(
+    session: Session,
+    decision: TriggerPromptDriverDecision,
+) -> OnTriggerPromptHook {
+    decision_driver_hook_at(
+        crate::config::base_dir().join("hub-trust.json"),
+        session,
+        decision,
+    )
+}
+
+fn decision_driver_hook_at(
+    trust_path: PathBuf,
+    session: Session,
+    decision: TriggerPromptDriverDecision,
+) -> OnTriggerPromptHook {
+    Arc::new(
+        move |request: TriggerPromptRequest, cancel: CancellationToken| {
+            let session = session.clone();
+            let trust_path = trust_path.clone();
+            Box::pin(async move {
+                let resolution = if cancel.is_cancelled() {
+                    UiTriggerPromptResolution {
+                        decision: TriggerPromptDecision::Timeout {
+                            reason: Some("trigger prompt cancelled".into()),
+                        },
+                        trust_decision: None,
+                    }
+                } else {
+                    decision.resolution()
+                };
+                if let Some(trust_decision) = resolution.trust_decision
+                    && let Err(err) =
+                        persist_trust_decision(&trust_path, &session, &request, trust_decision)
+                            .await
+                {
+                    return TriggerPromptDecision::Deny {
+                        reason: Some(format!(
+                            "could not persist hub trust decision: {}",
+                            crate::bug_report::redact(&err)
+                        )),
+                    };
+                }
+                resolution.decision
             })
         },
     )
@@ -414,10 +508,13 @@ fn sender_display_from_request(request: &TriggerPromptRequest) -> String {
 #[cfg(test)]
 mod tests {
     use pie_agent_core::{
-        CredentialScope, MemorySessionStorage, PayloadVisibility, ReplacementPolicy, Session,
-        SessionStorage, SourceKind, Trigger, TriggerAuthority, TriggerPromptRequest, TriggerSource,
+        AgentHarness, AgentHarnessOptions, BeforeTriggerContext, BeforeTriggerDecision,
+        BeforeTriggerHook, CredentialScope, MemorySessionStorage, PayloadVisibility, PromoteAction,
+        ReplacementPolicy, Session, SessionStorage, SourceKind, Trigger, TriggerAction,
+        TriggerAuthority, TriggerDelivery, TriggerPromptRequest, TriggerSource,
     };
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::tempdir;
 
     use super::*;
@@ -541,6 +638,123 @@ mod tests {
         );
         assert!(!audit_text.contains("hub_agent_abcdefgh"), "{audit_text}");
         assert!(!audit_text.contains("raw Local payload"), "{audit_text}");
+    }
+
+    #[tokio::test]
+    async fn decision_driver_hook_maps_block_and_skip_without_exposing_payload() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("hub-trust.json");
+        let storage = Arc::new(MemorySessionStorage::new());
+        let session = Session::new(storage.clone() as Arc<dyn SessionStorage>);
+        let request = TriggerPromptRequest {
+            trigger_prompt_id: "prompt_driver".into(),
+            trace_id: "trace_driver".into(),
+            source_label: "mcp:pie-hub:custom:agent_message:secret".into(),
+            receiver_agent_id: Some("11111111-1111-4111-8111-111111111111".into()),
+            sender_agent_id: "22222222-2222-4222-8222-222222222222".into(),
+            action_class: "notification".into(),
+            trigger_summary: Some("hello".into()),
+            payload: serde_json::json!({
+                "sender": { "mention": "@alice@dongxu" },
+                "payload": { "note": "hub_agent_secret_should_not_persist" }
+            }),
+            reason: "first contact".into(),
+        };
+
+        let hook = decision_driver_hook_at(
+            path.clone(),
+            session.clone(),
+            TriggerPromptDriverDecision::Block,
+        );
+        let decision = hook(request.clone(), CancellationToken::new()).await;
+        assert!(matches!(
+            decision,
+            TriggerPromptDecision::Deny { reason }
+                if reason.as_deref() == Some("blocked by user")
+        ));
+
+        let text = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(text.contains("\"decision\": \"block\""), "{text}");
+        assert!(
+            !text.contains("hub_agent_secret_should_not_persist"),
+            "{text}"
+        );
+        let audit_text = serde_json::to_string(&session.entries().await.unwrap()).unwrap();
+        assert!(
+            audit_text.contains("\"decision\":\"block\""),
+            "{audit_text}"
+        );
+        assert!(
+            !audit_text.contains("hub_agent_secret_should_not_persist"),
+            "{audit_text}"
+        );
+
+        let hook = decision_driver_hook_at(path, session, TriggerPromptDriverDecision::Skip);
+        let decision = hook(request, CancellationToken::new()).await;
+        assert!(matches!(
+            decision,
+            TriggerPromptDecision::Timeout { reason }
+                if reason.as_deref() == Some("deferred_by_user")
+        ));
+    }
+
+    #[tokio::test]
+    async fn decision_driver_block_stops_before_trigger_action() {
+        let dir = tempdir().unwrap();
+        let storage = Arc::new(MemorySessionStorage::new());
+        let session = Session::new(storage.clone() as Arc<dyn SessionStorage>);
+        let mut opts = AgentHarnessOptions::new(faux_model(), session.clone());
+        let prompt_hook: BeforeTriggerHook = Arc::new(|_ctx: BeforeTriggerContext, _cancel| {
+            Box::pin(async move {
+                BeforeTriggerDecision::Prompt {
+                    reason: "new hub sender requires first-contact approval".into(),
+                }
+            })
+        });
+        opts.before_trigger = Some(prompt_hook);
+        opts.on_trigger_prompt = Some(decision_driver_hook_at(
+            dir.path().join("hub-trust.json"),
+            session.clone(),
+            TriggerPromptDriverDecision::Block,
+        ));
+        let action_calls = Arc::new(AtomicUsize::new(0));
+        let action_calls_sink = action_calls.clone();
+        opts.before_trigger_action = Some(Arc::new(move |_ctx, _cancel| {
+            action_calls_sink.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                TriggerAction {
+                    prompt: "should not run".into(),
+                    promote: PromoteAction::None,
+                    promote_requires_approval: false,
+                    delivery: TriggerDelivery::InjectSummary,
+                }
+            })
+        }));
+
+        let harness = AgentHarness::new(opts);
+        let outcome = harness.handle_trigger(hub_message_trigger()).await;
+        assert!(matches!(outcome, pie_agent_core::EvaluationOutcome::Accept));
+        assert_eq!(
+            action_calls.load(Ordering::SeqCst),
+            0,
+            "blocked first-contact driver must not reach trigger execution"
+        );
+
+        let entries = session.entries().await.unwrap();
+        let trigger_record = entries
+            .iter()
+            .find_map(|entry| match entry {
+                pie_agent_core::SessionTreeEntry::Custom {
+                    custom_type, data, ..
+                } if custom_type == pie_agent_core::TriggerRecord::CUSTOM_TYPE => data.clone(),
+                _ => None,
+            })
+            .expect("trigger audit should be written");
+        assert_eq!(trigger_record["state"].as_str(), Some("needs_approval"));
+        assert_eq!(
+            trigger_record["evaluator_decision"]["prompt_decision"].as_str(),
+            Some("deny")
+        );
     }
 
     #[tokio::test]
@@ -671,6 +885,24 @@ mod tests {
                 expires_at: None,
             },
             received_at: Utc::now(),
+        }
+    }
+
+    fn faux_model() -> pie_ai::Model {
+        pie_ai::Model {
+            id: "faux".into(),
+            name: "Faux".into(),
+            api: pie_ai::Api::from("faux"),
+            provider: pie_ai::Provider::from("faux"),
+            base_url: String::new(),
+            reasoning: false,
+            thinking_level_map: None,
+            input: vec![],
+            cost: pie_ai::ModelCost::default(),
+            context_window: 0,
+            max_tokens: 0,
+            headers: None,
+            compat: None,
         }
     }
 }

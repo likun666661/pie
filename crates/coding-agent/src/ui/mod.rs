@@ -61,7 +61,9 @@ use crate::commands::{self, CommandCtx, CommandOutcome, Registry};
 use crate::control_plane_prompt::UiControlPlanePrompt;
 use crate::history::HistoryStore;
 use crate::readline::SlashCompleter;
-use crate::trigger_prompt::{TriggerTrustDecision, UiTriggerPrompt, UiTriggerPromptResolution};
+use crate::trigger_prompt::{
+    TriggerPromptDriverDecision, TriggerTrustDecision, UiTriggerPrompt, UiTriggerPromptResolution,
+};
 use crate::{images, mentions};
 use feed::{Feed, Level, TriggerPollStatus};
 use kernel::{QueuedTurn, ReplKernel, TurnState, poll_turn};
@@ -112,6 +114,7 @@ pub struct AppConfig {
     pub main_run_rx: UnboundedReceiver<String>,
     pub control_plane_prompt_rx: Option<UnboundedReceiver<UiControlPlanePrompt>>,
     pub trigger_prompt_rx: Option<UnboundedReceiver<UiTriggerPrompt>>,
+    pub trigger_prompt_driver: Option<TriggerPromptDriverDecision>,
     pub panel_status: PanelStatus,
 }
 
@@ -140,6 +143,7 @@ pub struct App {
     control_plane_prompt: Option<UiControlPlanePrompt>,
     trigger_prompt_rx: Option<UnboundedReceiver<UiTriggerPrompt>>,
     trigger_prompt: Option<UiTriggerPrompt>,
+    trigger_prompt_driver: Option<TriggerPromptDriverDecision>,
     panel_status: PanelStatus,
 
     input: TextArea<'static>,
@@ -185,6 +189,7 @@ impl App {
             control_plane_prompt: None,
             trigger_prompt_rx: config.trigger_prompt_rx,
             trigger_prompt: None,
+            trigger_prompt_driver: config.trigger_prompt_driver,
             panel_status: config.panel_status,
             input: new_textarea(),
             completions: Vec::new(),
@@ -436,6 +441,9 @@ impl App {
         self.trigger_prompt = Some(prompt);
         self.system_line(format!("hub first-contact prompt: {sender}"));
         self.follow = true;
+        if let Some(decision) = self.trigger_prompt_driver {
+            self.resolve_trigger_prompt(decision.resolution());
+        }
     }
 
     fn resolve_control_plane_prompt(
@@ -2211,6 +2219,7 @@ mod tests {
             main_run_rx,
             control_plane_prompt_rx: None,
             trigger_prompt_rx: None,
+            trigger_prompt_driver: None,
             panel_status: PanelStatus::default(),
         })
     }
@@ -3171,6 +3180,47 @@ mod tests {
             other => panic!("expected block deny decision, got {other:?}"),
         }
         assert_eq!(resolution.trust_decision, Some(TriggerTrustDecision::Block));
+    }
+
+    #[test]
+    fn trigger_prompt_driver_resolves_prompt_without_pty_key_timing() {
+        use tokio::sync::oneshot;
+
+        let mut app = test_app();
+        app.trigger_prompt_driver = Some(TriggerPromptDriverDecision::Always);
+        let (tx, mut rx) = oneshot::channel();
+        app.show_trigger_prompt(UiTriggerPrompt {
+            request: sample_trigger_prompt_request(),
+            responder: tx,
+        });
+
+        assert!(app.trigger_prompt.is_none());
+        let resolution = rx
+            .try_recv()
+            .expect("headless driver should resolve immediately");
+        assert!(matches!(
+            resolution.decision,
+            pie_agent_core::TriggerPromptDecision::Allow
+        ));
+        assert_eq!(
+            resolution.trust_decision,
+            Some(TriggerTrustDecision::Always)
+        );
+
+        let backend = TestBackend::new(96, 26);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+        let rendered = buffer_text(terminal.backend().buffer());
+        assert!(
+            rendered.contains("trusted hub sender for future notifications: @alice@dongxu"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("hub notification summary: @alice@dongxu"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("raw Local payload"), "{rendered}");
+        assert!(!rendered.contains("hub_agent_SECRET"), "{rendered}");
     }
 
     #[test]

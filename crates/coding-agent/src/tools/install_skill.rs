@@ -52,7 +52,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use pie_agent_core::{
-    AgentTool, AgentToolError, AgentToolResult, AgentToolUpdate, ToolExecutionMode,
+    AgentTool, AgentToolError, AgentToolResult, AgentToolUpdate, PermissionClassification,
+    ToolExecutionMode,
 };
 use pie_ai::{Tool, UserContentBlock};
 use serde::Deserialize;
@@ -129,6 +130,32 @@ impl AgentTool for InstallSkillTool {
         // reload — request sequential execution so it doesn't race other tool calls in
         // the same turn (e.g. a second InstallSkill, or reads of the skill catalog).
         Some(ToolExecutionMode::Sequential)
+    }
+
+    /// Issue #110 sub-PR 3 classifier — every install is a persistent control-plane write
+    /// that grows the model's tool surface, so always route through the
+    /// `on_control_plane_prompt` channel. The bounded reason names the source kind only
+    /// (whitelisted to `url` / `path` / `content`); the URL / path / content itself is
+    /// potentially secret-bearing (e.g. tokenized URLs) and is kept out of the prompt label
+    /// per the Provider/Auth URL audit-redaction discipline (PR `742dd6c`).
+    ///
+    /// The source-kind value is normalized through a fixed whitelist so a hostile or
+    /// malformed `source.type` (e.g. a model-supplied string containing payload) cannot
+    /// leak through the reason. Anything outside the whitelist becomes `"<unknown source>"`.
+    fn permission_classification(&self, prepared_args: &Value) -> PermissionClassification {
+        let raw_kind = prepared_args
+            .get("source")
+            .and_then(|s| s.get("type"))
+            .and_then(|t| t.as_str());
+        let normalized = match raw_kind {
+            Some("url" | "https") => "url",
+            Some("path") => "path",
+            Some("content") => "content",
+            _ => "<unknown source>",
+        };
+        PermissionClassification::Prompt {
+            reason: format!("install user skill from {normalized}"),
+        }
     }
 
     async fn execute(
@@ -1112,6 +1139,62 @@ mod tests {
         assert!(
             !serialized.contains("delta body"),
             "audit must not contain skill body, got: {serialized}"
+        );
+    }
+
+    #[test]
+    fn install_permission_reason_uses_whitelisted_source_kind_only() {
+        // Provider/Auth + QA gate on PR #139: the prompt reason is a UI/audit-facing field.
+        // It must NOT echo any model-supplied substring — `source.type` is normalized
+        // through a fixed whitelist (`url` / `https` → "url", `path`, `content`); anything
+        // else becomes "<unknown source>".
+        let cell: SkillHarnessCell = Arc::new(SyncOnceCell::new());
+        let tool = InstallSkillTool::with_skills_root(
+            cell,
+            std::env::temp_dir().join("install-skill-pc-test"),
+        );
+
+        // Known kinds normalize to their bounded label.
+        for (input_type, expected) in [
+            ("url", "url"),
+            ("https", "url"),
+            ("path", "path"),
+            ("content", "content"),
+        ] {
+            let cls = tool.permission_classification(&json!({
+                "source": { "type": input_type, "url": "ignored-by-reason" },
+            }));
+            let PermissionClassification::Prompt { reason } = cls else {
+                panic!("InstallSkill must always Prompt; got {cls:?}");
+            };
+            assert!(
+                reason.contains(expected),
+                "reason must name normalized source kind {expected}; got: {reason}"
+            );
+            assert!(
+                !reason.contains("ignored-by-reason"),
+                "reason must not echo source value; got: {reason}"
+            );
+        }
+
+        // Hostile / model-smuggled source.type collapses to <unknown source>.
+        let evil = json!({
+            "source": {
+                "type": "https://hub.example/api?token=ABCDEFGHIJKLMNOPQRSTUVWXYZ_super_secret",
+                "url": "ignored",
+            },
+        });
+        let cls = tool.permission_classification(&evil);
+        let PermissionClassification::Prompt { reason } = cls else {
+            panic!("InstallSkill must always Prompt; got {cls:?}");
+        };
+        assert!(
+            reason.contains("<unknown source>"),
+            "non-whitelisted source.type must normalize to <unknown source>; got: {reason}"
+        );
+        assert!(
+            !reason.contains("token=") && !reason.contains("super_secret"),
+            "reason must NOT echo any payload smuggled through source.type; got: {reason}"
         );
     }
 

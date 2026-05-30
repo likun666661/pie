@@ -396,14 +396,63 @@ async fn execute_tools(
         )
         .await;
 
-        // before_tool_call hook can veto. The hook sees the prepared args on BOTH
-        // `ctx.args` and `ctx.tool_call.arguments` — there is no reason to expose two
-        // shapes of the same call (a hook reading `tool_call.arguments` would otherwise
-        // miss any normalization the tool's `prepare_arguments` applied). If the tool's
-        // `prepare_arguments` returns a non-Object shape (Null, Array, scalar), we cannot
-        // represent it inside the `pie_ai::ToolCall.arguments` map; we clear the map to
-        // empty so the hook author has only one truthy source (`ctx.args`) and cannot read
-        // a stale raw map.
+        // Per-tool classification runs first (issue #110 design v0.2 Artifact A). The
+        // classifier sees the prepared args and decides Allow / Prompt / Block before the
+        // user-configured `before_tool_call` hook gets a chance. `Block` short-circuits
+        // immediately (no `before_tool_call`, no prompt); `Prompt` synthesizes a default
+        // `BeforeToolCallResult::prompt` that the user hook can override; `Allow` falls
+        // through to the existing `before_tool_call` path with no synthesized prompt.
+        let classification = match &tool {
+            Some(t) => t.permission_classification(&args),
+            None => PermissionClassification::Allow,
+        };
+        if let PermissionClassification::Block { reason } = &classification {
+            let result = AgentToolResult {
+                content: vec![UserContentBlock::text(reason.clone())],
+                details: serde_json::Value::Null,
+                terminate: None,
+            };
+            prepared.push(PreparedCall::Blocked {
+                id: tool_id,
+                name: tool_name,
+                args,
+                result,
+            });
+            continue;
+        }
+
+        // The classifier's `Prompt` is the authoritative source: a user-configured
+        // `before_tool_call` hook MUST NOT silently erase a control-plane prompt requirement
+        // by returning `BeforeToolCallResult::default()`. We preserve the synthesized prompt
+        // unless the hook either explicitly hard-blocks (`block=true` wins, classifier
+        // intent honored — Block-stronger-than-Prompt) or supplies its own richer
+        // `BeforeToolCallResult::prompt` payload (which the runtime then re-binds to the
+        // authoritative `tool_call_id` / `tool_name` / `args_hash` below — the hook may
+        // only enrich `label` and `payload`, never spoof binding fields).
+        //
+        // The hook still sees the prepared args on BOTH `ctx.args` and
+        // `ctx.tool_call.arguments` (matched semantics from the legacy code path). If the
+        // tool's `prepare_arguments` returns a non-Object shape we clear the map so the
+        // hook author has only one truthy source.
+        let synthesized_prompt: Option<ControlPlanePromptRequest> = match &classification {
+            PermissionClassification::Prompt { reason } => Some(ControlPlanePromptRequest {
+                tool_call_id: tool_id.clone(),
+                tool_name: tool_name.clone(),
+                args_hash: compute_args_hash(&args),
+                label: format!("Control-plane write: {tool_name}"),
+                payload: default_prompt_payload(&tool_name, &args),
+                reason: reason.clone(),
+            }),
+            PermissionClassification::Allow => None,
+            // Block already handled by the early-return above; kept for exhaustiveness.
+            PermissionClassification::Block { .. } => unreachable!(),
+        };
+
+        let mut hook_result = BeforeToolCallResult {
+            block: false,
+            reason: None,
+            prompt: synthesized_prompt.clone(),
+        };
         if let Some(hook) = inner.options.before_tool_call.clone() {
             let mut hook_tc = (*tc).clone();
             hook_tc.arguments = match &args {
@@ -416,23 +465,125 @@ async fn execute_tools(
                 args: args.clone(),
                 context: agent_context.clone(),
             };
-            let veto = hook(ctx, cancel.clone()).await;
-            if veto.block {
-                let reason = veto
-                    .reason
-                    .unwrap_or_else(|| "tool call blocked by before_tool_call hook".to_string());
-                let result = AgentToolResult {
-                    content: vec![UserContentBlock::text(reason)],
-                    details: serde_json::Value::Null,
-                    terminate: None,
-                };
-                prepared.push(PreparedCall::Blocked {
-                    id: tool_id,
-                    name: tool_name,
-                    args,
-                    result,
-                });
-                continue;
+            hook_result = hook(ctx, cancel.clone()).await;
+        }
+        if hook_result.block {
+            let reason = hook_result
+                .reason
+                .unwrap_or_else(|| "tool call blocked by before_tool_call hook".to_string());
+            let result = AgentToolResult {
+                content: vec![UserContentBlock::text(reason)],
+                details: serde_json::Value::Null,
+                terminate: None,
+            };
+            prepared.push(PreparedCall::Blocked {
+                id: tool_id,
+                name: tool_name,
+                args,
+                result,
+            });
+            continue;
+        }
+        // Merge: if the classifier requested a Prompt, ensure the runtime still routes
+        // through the prompt channel even if the hook returned `prompt = None`. If the hook
+        // supplied its own prompt, accept it as the embedder's richer card BUT re-bind
+        // `tool_call_id` / `tool_name` / `args_hash` to the runtime-authoritative values so
+        // a hook cannot lie about binding fields (forgery resistance).
+        let effective_prompt: Option<ControlPlanePromptRequest> =
+            match (synthesized_prompt, hook_result.prompt.take()) {
+                // Classifier said Prompt, hook didn't supply one → keep the classifier's.
+                (Some(synth), None) => Some(synth),
+                // Classifier said Allow but hook supplied a prompt → accept it (hook is
+                // raising the bar). Runtime still owns binding fields.
+                (None, Some(hook_supplied)) => Some(ControlPlanePromptRequest {
+                    tool_call_id: tool_id.clone(),
+                    tool_name: tool_name.clone(),
+                    args_hash: compute_args_hash(&args),
+                    label: hook_supplied.label,
+                    payload: hook_supplied.payload,
+                    reason: hook_supplied.reason,
+                }),
+                // Classifier said Prompt AND hook supplied a custom payload → use hook's
+                // label/payload (richer card) BUT re-bind authoritative fields. Hook cannot
+                // override the classifier's `reason` (it's the reason the gate exists), but
+                // can supply additional context via `payload`.
+                (Some(synth), Some(hook_supplied)) => Some(ControlPlanePromptRequest {
+                    tool_call_id: synth.tool_call_id,
+                    tool_name: synth.tool_name,
+                    args_hash: synth.args_hash,
+                    label: hook_supplied.label,
+                    payload: hook_supplied.payload,
+                    reason: synth.reason,
+                }),
+                // Neither classifier nor hook required a prompt → no gate.
+                (None, None) => None,
+            };
+        // Prompt path: ask the embedder, map decision to allow/block. Fail-closed when no
+        // prompt channel is configured.
+        if let Some(prompt_req) = effective_prompt {
+            let decision = match inner.options.on_control_plane_prompt.clone() {
+                Some(prompt_hook) => prompt_hook(prompt_req.clone(), cancel.clone()).await,
+                None => ControlPlanePromptDecision::Deny {
+                    reason: Some(
+                        "control-plane prompt required but no on_control_plane_prompt hook \
+                         configured (fail-closed deny — see issue #110 design v0.2)"
+                            .to_string(),
+                    ),
+                },
+            };
+            emit(
+                inner,
+                AgentEvent::ControlPlanePromptResolved {
+                    tool_call_id: prompt_req.tool_call_id.clone(),
+                    tool_name: prompt_req.tool_name.clone(),
+                    args_hash: prompt_req.args_hash.clone(),
+                    label: prompt_req.label.clone(),
+                    decision: decision.as_audit_str().to_string(),
+                    reason: match &decision {
+                        ControlPlanePromptDecision::Deny { reason } => reason.clone(),
+                        _ => None,
+                    },
+                },
+                cancel,
+            )
+            .await;
+            match decision {
+                ControlPlanePromptDecision::Allow => {
+                    // fall through to dispatch
+                }
+                ControlPlanePromptDecision::Deny { reason } => {
+                    let reason = reason.unwrap_or_else(|| {
+                        "tool call denied by user via control-plane prompt".to_string()
+                    });
+                    let result = AgentToolResult {
+                        content: vec![UserContentBlock::text(reason)],
+                        details: serde_json::Value::Null,
+                        terminate: None,
+                    };
+                    prepared.push(PreparedCall::Blocked {
+                        id: tool_id,
+                        name: tool_name,
+                        args,
+                        result,
+                    });
+                    continue;
+                }
+                ControlPlanePromptDecision::Timeout => {
+                    let result = AgentToolResult {
+                        content: vec![UserContentBlock::text(
+                            "control-plane prompt timed out — tool call denied".to_string(),
+                        )],
+                        details: serde_json::Value::Null,
+                        terminate: None,
+                    };
+                    prepared.push(PreparedCall::Blocked {
+                        id: tool_id,
+                        name: tool_name,
+                        args,
+                        result,
+                    });
+                    continue;
+                }
             }
         }
 
@@ -711,4 +862,92 @@ async fn finalize(inner: &Arc<AgentInner>, cancel: CancellationToken) {
     inner.state.lock().is_streaming = false;
     *inner.active_cancel.lock() = None;
     inner.idle.notify_waiters();
+}
+
+/// Canonical-JSON SHA-256 of the prepared tool args. Binds a control-plane prompt
+/// approval to the exact invocation (issue #110 design v0.2 §1 Decision binding).
+///
+/// Canonicalization rules: object keys sorted lexicographically, no extra whitespace,
+/// stable encoding of every numeric / string value. We use `serde_json` with the keys
+/// pre-sorted by walking the tree — `serde_json::to_string` does NOT sort object keys by
+/// default, so we re-serialize through a `BTreeMap` projection for objects.
+fn compute_args_hash(args: &serde_json::Value) -> String {
+    use sha2::{Digest, Sha256};
+    let canonical = canonicalize(args);
+    let bytes = serde_json::to_vec(&canonical)
+        .unwrap_or_else(|_| b"<args canonicalization failed>".to_vec());
+    let digest = Sha256::digest(&bytes);
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write;
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+fn canonicalize(value: &serde_json::Value) -> serde_json::Value {
+    use std::collections::BTreeMap;
+    match value {
+        serde_json::Value::Object(map) => {
+            // BTreeMap iterates in key order — produces sorted JSON object on re-serialize.
+            let sorted: BTreeMap<String, serde_json::Value> = map
+                .iter()
+                .map(|(k, v)| (k.clone(), canonicalize(v)))
+                .collect();
+            serde_json::to_value(sorted).unwrap_or(serde_json::Value::Null)
+        }
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.iter().map(canonicalize).collect())
+        }
+        other => other.clone(),
+    }
+}
+
+/// Default **redaction-safe by construction** prompt payload synthesized from the
+/// classifier outcome. Per @Provider-Auth-Lead + @CLI-TUI-Dev-Lead on PR #135 review:
+/// the runtime must NEVER emit raw prepared args in the default payload — control-plane
+/// tools often carry URLs with tokens, secret-bearing values, or large blobs whose raw
+/// rendering would defeat the entire prompt-card audit story.
+///
+/// Default payload contains only:
+/// - `tool_name` — display label only.
+/// - `args_keys` — the top-level argument key names (sorted, ≤ 32 keys, each ≤ 64 chars).
+///   Reveals what *categories* of input the tool received without revealing the values.
+/// - `args_hash` — the same SHA-256 the runtime uses for anti-replay binding. Lets the
+///   prompt UI render a stable per-call identifier (e.g. for "this is the same write
+///   you approved 10 seconds ago" UX).
+///
+/// Tools that want a *richer* card (preview of the install source URL with token
+/// stripped, diff of a config edit, etc.) override via `before_tool_call` returning
+/// their own `BeforeToolCallResult.prompt` with a hand-redacted `payload`. Runtime
+/// re-binds the authoritative `tool_call_id` / `tool_name` / `args_hash` fields after
+/// the override, so the hook cannot accidentally weaken the binding.
+fn default_prompt_payload(tool_name: &str, args: &serde_json::Value) -> serde_json::Value {
+    const MAX_KEYS: usize = 32;
+    const MAX_KEY_LEN: usize = 64;
+    let keys: Vec<String> = match args {
+        serde_json::Value::Object(map) => {
+            let mut ks: Vec<String> = map
+                .keys()
+                .take(MAX_KEYS)
+                .map(|k| {
+                    if k.chars().count() <= MAX_KEY_LEN {
+                        k.clone()
+                    } else {
+                        let mut t: String = k.chars().take(MAX_KEY_LEN).collect();
+                        t.push('…');
+                        t
+                    }
+                })
+                .collect();
+            ks.sort();
+            ks
+        }
+        _ => Vec::new(),
+    };
+    serde_json::json!({
+        "tool_name": tool_name,
+        "args_keys": keys,
+        "args_hash": compute_args_hash(args),
+    })
 }

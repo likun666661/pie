@@ -719,7 +719,12 @@ export class AgentMailbox {
       const stream = new TransformStream<Uint8Array, Uint8Array>();
       const writer = stream.writable.getWriter();
       this.sessions.add(writer);
-      await writer.write(this.encoder.encode(": connected\n\n"));
+      void writer.closed.catch(() => undefined).finally(() => {
+        this.sessions.delete(writer);
+      });
+      void writer.write(this.encoder.encode(": connected\n\n")).catch(() => {
+        this.sessions.delete(writer);
+      });
       return new Response(stream.readable, sseHeaders());
     }
 
@@ -732,10 +737,10 @@ export class AgentMailbox {
       let delivered = 0;
       for (const writer of [...this.sessions]) {
         try {
-          const wrote = await Promise.race([writer.write(bytes).then(() => true), delay(5_000).then(() => false)]);
-          if (wrote) {
-            delivered += 1;
-          }
+          void writer.write(bytes).catch(() => {
+            this.sessions.delete(writer);
+          });
+          delivered += 1;
         } catch {
           this.sessions.delete(writer);
         }
@@ -1776,9 +1781,6 @@ function randomSecret(bytes: number): string {
   return [...raw].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 function nowIso(): string {
   return new Date().toISOString();

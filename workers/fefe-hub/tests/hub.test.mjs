@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createTestApp, MemoryStore } from "../dist/index.js";
+import { AgentMailbox, createTestApp, MemoryStore } from "../dist/index.js";
 
 const BASE = "https://hub.test";
 
@@ -91,6 +91,46 @@ test("sends cross-namespace notification over SSE with canonical MCP metadata", 
   assert.equal(backlog[0].payload_visibility, "Local");
   assert.equal(backlog[0].payload_json, null);
   assert.doesNotMatch(JSON.stringify(backlog), /kept-local/);
+});
+
+test("durable mailbox opens SSE before the heartbeat is drained", async () => {
+  const mailbox = new AgentMailbox({ blockConcurrencyWhile: async (callback) => callback() });
+  const response = await withTimeout(mailbox.fetch(new Request(`${BASE}/connect`)), 100);
+  assert.equal(response.status, 200);
+  assert.ok(response.body);
+
+  const reader = response.body.getReader();
+  const heartbeat = await withTimeout(reader.read(), 1000);
+  assert.match(new TextDecoder().decode(heartbeat.value), /: connected/);
+
+  const notification = {
+    notification_id: crypto.randomUUID(),
+    receiver_agent_id: "receiver-agent",
+    sender_agent_id: "sender-agent",
+    sender_handle: "sender",
+    sender_namespace: "alice",
+    summary: "Durable delivery",
+    payload_json: null,
+    payload_visibility: "Local",
+    status: "pending",
+    first_contact_required: 0,
+    created_at: new Date().toISOString(),
+    delivered_at: null,
+    acked_at: null,
+  };
+  const push = await mailbox.fetch(
+    new Request(`${BASE}/push`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ notification }),
+    }),
+  );
+  assert.equal(push.status, 200);
+  assert.deepEqual(await push.json(), { delivered: true });
+
+  const event = await readChunk(reader);
+  assert.match(event, /notifications\/agent_message/);
+  await reader.cancel();
 });
 
 test("shared notification payload is explicit and remains bounded", async () => {
@@ -235,4 +275,18 @@ async function readChunk(reader) {
     }
   }
   throw new Error("timed out waiting for SSE event");
+}
+
+async function withTimeout(promise, ms) {
+  let timeout;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => reject(new Error(`timed out after ${ms}ms`)), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeout);
+  }
 }

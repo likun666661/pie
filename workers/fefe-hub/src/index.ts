@@ -755,12 +755,10 @@ export class AgentMailbox {
       const bytes = this.encoder.encode(toSseEvent(body.notification));
       let delivered = 0;
       for (const writer of [...this.sessions]) {
-        try {
-          await writer.write(bytes);
-          delivered += 1;
-        } catch {
+        delivered += 1;
+        void writer.write(bytes).catch(() => {
           this.sessions.delete(writer);
-        }
+        });
       }
       return json({ delivered: delivered > 0 });
     }

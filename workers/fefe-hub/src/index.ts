@@ -19,6 +19,7 @@ const PAYLOAD_LIMIT_BYTES = 8 * 1024;
 const SUMMARY_LIMIT_CHARS = 240;
 const LIST_DEFAULT_LIMIT = 50;
 const LIST_MAX_LIMIT = 100;
+const AUTH_EXCHANGE_TTL_SECONDS = 5 * 60;
 
 type Discoverable = "public" | "namespace" | "none";
 type Inbox = "open" | "namespace" | "invited" | "closed";
@@ -104,6 +105,21 @@ interface AgentTokenRecord {
   revoked_at: string | null;
 }
 
+interface AuthExchangeRecord {
+  exchange_request_id: string;
+  client_kind: string;
+  client_version: string;
+  loopback_redirect_uri: string;
+  code_challenge: string;
+  state_hash: string;
+  created_at: string;
+  expires_at: string;
+  code_hash: string | null;
+  code_issued_at: string | null;
+  user_id: string | null;
+  used_at: string | null;
+}
+
 interface TrustGrantRecord {
   receiver_agent_id: string;
   sender_agent_id: string;
@@ -152,6 +168,7 @@ type Principal =
 
 interface Store {
   createUser(user: UserRecord): Promise<void>;
+  getUser(userId: string): Promise<UserRecord | null>;
   getUserByUsername(username: string): Promise<UserRecord | null>;
   getUserByNamespace(namespace: string): Promise<UserRecord | null>;
   createHumanSession(session: HumanSessionRecord): Promise<void>;
@@ -165,6 +182,10 @@ interface Store {
   createAgentToken(token: AgentTokenRecord): Promise<void>;
   getAgentTokenByHash(tokenHash: string): Promise<AgentTokenRecord | null>;
   revokeAgentToken(tokenId: string, revokedAt: string): Promise<void>;
+  createAuthExchange(record: AuthExchangeRecord): Promise<void>;
+  getAuthExchange(exchangeRequestId: string): Promise<AuthExchangeRecord | null>;
+  issueAuthExchangeCode(exchangeRequestId: string, codeHash: string, userId: string, codeIssuedAt: string): Promise<void>;
+  consumeAuthExchangeCode(exchangeRequestId: string, codeHash: string, userId: string, usedAt: string): Promise<boolean>;
   touchAgent(agentId: string, at: string): Promise<void>;
   listTrust(receiverAgentId: string): Promise<TrustGrantRecord[]>;
   getTrust(receiverAgentId: string, senderAgentId: string): Promise<TrustGrantRecord | null>;
@@ -231,6 +252,10 @@ class D1Store implements Store {
 
   getUserByUsername(username: string): Promise<UserRecord | null> {
     return this.db.prepare("SELECT * FROM users WHERE username = ?").bind(username).first<UserRecord>();
+  }
+
+  getUser(userId: string): Promise<UserRecord | null> {
+    return this.db.prepare("SELECT * FROM users WHERE user_id = ?").bind(userId).first<UserRecord>();
   }
 
   getUserByNamespace(namespace: string): Promise<UserRecord | null> {
@@ -370,6 +395,65 @@ class D1Store implements Store {
 
   async revokeAgentToken(tokenId: string, revokedAt: string): Promise<void> {
     await this.db.prepare("UPDATE agent_tokens SET revoked_at = ? WHERE token_id = ?").bind(revokedAt, tokenId).run();
+  }
+
+  async createAuthExchange(record: AuthExchangeRecord): Promise<void> {
+    await this.db
+      .prepare(
+        `INSERT INTO auth_exchanges
+         (exchange_request_id, client_kind, client_version, loopback_redirect_uri,
+          code_challenge, state_hash, created_at, expires_at, code_hash,
+          code_issued_at, user_id, used_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        record.exchange_request_id,
+        record.client_kind,
+        record.client_version,
+        record.loopback_redirect_uri,
+        record.code_challenge,
+        record.state_hash,
+        record.created_at,
+        record.expires_at,
+        record.code_hash,
+        record.code_issued_at,
+        record.user_id,
+        record.used_at,
+      )
+      .run();
+  }
+
+  getAuthExchange(exchangeRequestId: string): Promise<AuthExchangeRecord | null> {
+    return this.db
+      .prepare("SELECT * FROM auth_exchanges WHERE exchange_request_id = ?")
+      .bind(exchangeRequestId)
+      .first<AuthExchangeRecord>();
+  }
+
+  async issueAuthExchangeCode(exchangeRequestId: string, codeHash: string, userId: string, codeIssuedAt: string): Promise<void> {
+    await this.db
+      .prepare(
+        `UPDATE auth_exchanges
+         SET code_hash = ?, code_issued_at = ?, user_id = ?
+         WHERE exchange_request_id = ? AND used_at IS NULL`,
+      )
+      .bind(codeHash, codeIssuedAt, userId, exchangeRequestId)
+      .run();
+  }
+
+  async consumeAuthExchangeCode(exchangeRequestId: string, codeHash: string, userId: string, usedAt: string): Promise<boolean> {
+    const result = await this.db
+      .prepare(
+        `UPDATE auth_exchanges
+         SET used_at = ?
+         WHERE exchange_request_id = ?
+           AND code_hash = ?
+           AND user_id = ?
+           AND used_at IS NULL`,
+      )
+      .bind(usedAt, exchangeRequestId, codeHash, userId)
+      .run();
+    return d1ChangedRows(result) === 1;
   }
 
   async touchAgent(agentId: string, at: string): Promise<void> {
@@ -512,6 +596,10 @@ export class MemoryStore implements Store {
     return [...this.users.values()].find((u) => u.username === username) ?? null;
   }
 
+  async getUser(userId: string): Promise<UserRecord | null> {
+    return this.users.get(userId) ?? null;
+  }
+
   async getUserByNamespace(namespace: string): Promise<UserRecord | null> {
     return [...this.users.values()].find((u) => u.namespace === namespace) ?? null;
   }
@@ -573,6 +661,33 @@ export class MemoryStore implements Store {
         this.agentTokensByHash.set(hash, { ...token, revoked_at: revokedAt });
       }
     }
+  }
+
+  private readonly authExchanges = new Map<string, AuthExchangeRecord>();
+
+  async createAuthExchange(record: AuthExchangeRecord): Promise<void> {
+    this.authExchanges.set(record.exchange_request_id, { ...record });
+  }
+
+  async getAuthExchange(exchangeRequestId: string): Promise<AuthExchangeRecord | null> {
+    const record = this.authExchanges.get(exchangeRequestId);
+    return record ? { ...record } : null;
+  }
+
+  async issueAuthExchangeCode(exchangeRequestId: string, codeHash: string, userId: string, codeIssuedAt: string): Promise<void> {
+    const record = this.authExchanges.get(exchangeRequestId);
+    if (record && !record.used_at) {
+      this.authExchanges.set(exchangeRequestId, { ...record, code_hash: codeHash, code_issued_at: codeIssuedAt, user_id: userId });
+    }
+  }
+
+  async consumeAuthExchangeCode(exchangeRequestId: string, codeHash: string, userId: string, usedAt: string): Promise<boolean> {
+    const record = this.authExchanges.get(exchangeRequestId);
+    if (!record || record.used_at || record.code_hash !== codeHash || record.user_id !== userId) {
+      return false;
+    }
+    this.authExchanges.set(exchangeRequestId, { ...record, used_at: usedAt });
+    return true;
   }
 
   async touchAgent(agentId: string, at: string): Promise<void> {
@@ -765,11 +880,23 @@ export class HubApp {
       if (request.method === "GET" && url.pathname === "/health") {
         return json({ ok: true, version: this.version, protocol_version: PROTOCOL_VERSION });
       }
+      if (url.pathname === "/auth/start" && request.method === "POST") {
+        return json(await this.startAuth(await readJsonObject(request), url.origin));
+      }
+      if (url.pathname === "/auth/exchange_code" && request.method === "POST") {
+        return json(await this.exchangeAuthCode(await readJsonObject(request)));
+      }
       if (url.pathname === "/auth/register" && request.method === "POST") {
         return json(await this.registerUser(await readJsonObject(request)));
       }
       if (url.pathname === "/auth/login" && request.method === "POST") {
         return json(await this.loginUser(await readJsonObject(request)));
+      }
+      if (url.pathname === "/login" && request.method === "GET") {
+        return this.loginPage(url);
+      }
+      if (url.pathname === "/login" && request.method === "POST") {
+        return this.completeBrowserLogin(await readFormObject(request));
       }
       if (url.pathname === "/mcp" && request.method === "GET") {
         const principal = await this.authenticate(request, "agent");
@@ -954,13 +1081,170 @@ export class HubApp {
     throw accepts === "agent" ? ERR.authRequired() : ERR.authInvalid();
   }
 
+  private async startAuth(args: Record<string, unknown>, origin: string): Promise<unknown> {
+    ensureOnly(args, ["client_kind", "client_version", "loopback_redirect_uri", "code_challenge", "code_challenge_method", "state"]);
+    const clientKind = stringField(args, "client_kind");
+    if (clientKind !== "pie-cli") {
+      throw ERR.schemaInvalid(["client_kind must be pie-cli"]);
+    }
+    const clientVersion = validatePlainText(stringField(args, "client_version"), "client_version", 64);
+    const loopbackRedirectUri = validateLoopbackRedirectUri(stringField(args, "loopback_redirect_uri"));
+    const codeChallenge = validatePkceValue(stringField(args, "code_challenge"), "code_challenge");
+    if (stringField(args, "code_challenge_method") !== "S256") {
+      throw ERR.schemaInvalid(["code_challenge_method must be S256"]);
+    }
+    const state = validateOpaqueValue(stringField(args, "state"), "state");
+    const exchangeRequestId = crypto.randomUUID();
+    const createdAt = nowIso();
+    await this.store.createAuthExchange({
+      exchange_request_id: exchangeRequestId,
+      client_kind: clientKind,
+      client_version: clientVersion,
+      loopback_redirect_uri: loopbackRedirectUri,
+      code_challenge: codeChallenge,
+      state_hash: await sha256Hex(state),
+      created_at: createdAt,
+      expires_at: addSecondsIso(AUTH_EXCHANGE_TTL_SECONDS),
+      code_hash: null,
+      code_issued_at: null,
+      user_id: null,
+      used_at: null,
+    });
+    const loginUrl = new URL("/login", origin);
+    loginUrl.searchParams.set("req", exchangeRequestId);
+    loginUrl.searchParams.set("state", state);
+    return {
+      exchange_request_id: exchangeRequestId,
+      login_url: loginUrl.toString(),
+      expires_in_seconds: AUTH_EXCHANGE_TTL_SECONDS,
+    };
+  }
+
+  private loginPage(url: URL): Response {
+    const req = escapeHtml(url.searchParams.get("req") ?? "");
+    const state = escapeHtml(url.searchParams.get("state") ?? "");
+    const body = `<!doctype html>
+<meta charset="utf-8">
+<title>Join pie hub</title>
+<form method="post" action="/login">
+  <input type="hidden" name="exchange_request_id" value="${req}">
+  <input type="hidden" name="state" value="${state}">
+  <label>Username <input name="username" autocomplete="username" required></label>
+  <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
+  <button type="submit" name="mode" value="login">Sign in</button>
+  <button type="submit" name="mode" value="register">Create account</button>
+</form>`;
+    return new Response(body, {
+      status: 200,
+      headers: {
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "no-store",
+        "referrer-policy": "no-referrer",
+      },
+    });
+  }
+
+  private async completeBrowserLogin(args: Record<string, unknown>): Promise<Response> {
+    ensureOnly(args, ["mode", "username", "password", "namespace", "exchange_request_id", "state"]);
+    const mode = optionalString(args.mode, "mode") ?? "login";
+    const username = normalizeName(stringField(args, "username"), "username");
+    const password = stringField(args, "password");
+    const exchange = await this.requireAuthExchange(stringField(args, "exchange_request_id"), stringField(args, "state"));
+    let user: UserRecord;
+    if (mode === "register") {
+      user = await this.createUserFromCredentials(username, password, optionalString(args.namespace, "namespace"));
+    } else if (mode === "login") {
+      user = await this.requireUserPassword(username, password);
+    } else {
+      throw ERR.schemaInvalid(["mode must be login or register"]);
+    }
+    const code = `hub_code_${crypto.randomUUID()}_${randomSecret(24)}`;
+    await this.store.issueAuthExchangeCode(exchange.exchange_request_id, await sha256Hex(code), user.user_id, nowIso());
+    const redirect = new URL(exchange.loopback_redirect_uri);
+    redirect.searchParams.set("code", code);
+    redirect.searchParams.set("state", stringField(args, "state"));
+    return new Response(null, {
+      status: 302,
+      headers: {
+        location: redirect.toString(),
+        "cache-control": "no-store",
+        "referrer-policy": "no-referrer",
+      },
+    });
+  }
+
+  private async exchangeAuthCode(args: Record<string, unknown>): Promise<unknown> {
+    ensureOnly(args, ["exchange_request_id", "code", "state", "code_verifier"]);
+    const exchange = await this.requireAuthExchange(stringField(args, "exchange_request_id"), stringField(args, "state"));
+    if (!exchange.code_hash || !exchange.user_id || exchange.used_at) {
+      throw ERR.authInvalid();
+    }
+    if ((await sha256Hex(validateOpaqueValue(stringField(args, "code"), "code"))) !== exchange.code_hash) {
+      throw ERR.authInvalid();
+    }
+    const verifier = validatePkceValue(stringField(args, "code_verifier"), "code_verifier");
+    if ((await sha256Base64Url(verifier)) !== exchange.code_challenge) {
+      throw ERR.authInvalid();
+    }
+    const user = await this.store.getUser(exchange.user_id);
+    if (!user) {
+      throw ERR.authInvalid();
+    }
+    const consumed = await this.store.consumeAuthExchangeCode(exchange.exchange_request_id, exchange.code_hash, exchange.user_id, nowIso());
+    if (!consumed) {
+      throw ERR.authInvalid();
+    }
+    const agent = await this.ensureDefaultAgent(user);
+    const hubToken = await this.issueAgentToken(agent, DEFAULT_PERMISSIONS.slice());
+    return {
+      agent_id: agent.agent_id,
+      handle: agent.handle,
+      namespace: agent.namespace,
+      hub_token: hubToken,
+      expires_at: null,
+      profile: {
+        display_name: agent.display_name,
+        description: agent.description.length === 0 ? null : agent.description,
+        capabilities: parseJsonArray(agent.capabilities_json),
+      },
+      visibility: {
+        discoverable: agent.discoverable,
+        inbox: agent.inbox,
+      },
+    };
+  }
+
   private async registerUser(args: Record<string, unknown>): Promise<unknown> {
+    ensureOnly(args, ["username", "password", "namespace"]);
+    const user = await this.createUserFromCredentials(
+      stringField(args, "username"),
+      stringField(args, "password"),
+      optionalString(args.namespace, "namespace"),
+    );
+    return {
+      user_id: user.user_id,
+      username: user.username,
+      namespace: user.namespace,
+      session_token: await this.issueHumanSession(user),
+    };
+  }
+
+  private async loginUser(args: Record<string, unknown>): Promise<unknown> {
+    ensureOnly(args, ["username", "password"]);
+    const user = await this.requireUserPassword(stringField(args, "username"), stringField(args, "password"));
+    return {
+      user_id: user.user_id,
+      username: user.username,
+      namespace: user.namespace,
+      session_token: await this.issueHumanSession(user),
+    };
+  }
+
+  private async createUserFromCredentials(usernameRaw: string, password: string, namespaceRaw: string | null): Promise<UserRecord> {
     let phase = "validate";
     try {
-      ensureOnly(args, ["username", "password", "namespace"]);
-      const username = normalizeName(stringField(args, "username"), "username");
-      const namespace = normalizeName(optionalString(args.namespace, "namespace") ?? username, "namespace");
-      const password = stringField(args, "password");
+      const username = normalizeName(usernameRaw, "username");
+      const namespace = normalizeName(namespaceRaw ?? username, "namespace");
       if (password.length < 12) {
         throw ERR.schemaInvalid(["password must be at least 12 characters"]);
       }
@@ -985,24 +1269,15 @@ export class HubApp {
       };
       phase = "insert_user";
       await this.store.createUser(user);
-      phase = "issue_session";
-      const sessionToken = await this.issueHumanSession(user);
-      return {
-        user_id: user.user_id,
-        username: user.username,
-        namespace: user.namespace,
-        session_token: sessionToken,
-      };
+      return user;
     } catch (error) {
       if (error instanceof PublicError) throw error;
       throw new PublicError(-32603, "internal", "Hub is temporarily unavailable. Retry with backoff.", { phase });
     }
   }
 
-  private async loginUser(args: Record<string, unknown>): Promise<unknown> {
-    ensureOnly(args, ["username", "password"]);
-    const username = normalizeName(stringField(args, "username"), "username");
-    const password = stringField(args, "password");
+  private async requireUserPassword(usernameRaw: string, password: string): Promise<UserRecord> {
+    const username = normalizeName(usernameRaw, "username");
     const user = await this.store.getUserByUsername(username);
     if (!user) {
       throw ERR.authInvalid();
@@ -1011,12 +1286,19 @@ export class HubApp {
     if (!timingSafeEqual(expected, user.password_hash)) {
       throw ERR.authInvalid();
     }
-    return {
-      user_id: user.user_id,
-      username: user.username,
-      namespace: user.namespace,
-      session_token: await this.issueHumanSession(user),
-    };
+    return user;
+  }
+
+  private async requireAuthExchange(exchangeRequestId: string, stateRaw: string): Promise<AuthExchangeRecord> {
+    const state = validateOpaqueValue(stateRaw, "state");
+    const exchange = await this.store.getAuthExchange(validateUuid(exchangeRequestId, "exchange_request_id"));
+    if (!exchange || exchange.used_at || exchange.expires_at <= nowIso()) {
+      throw ERR.authInvalid();
+    }
+    if ((await sha256Hex(state)) !== exchange.state_hash) {
+      throw ERR.authInvalid();
+    }
+    return exchange;
   }
 
   private async issueHumanSession(user: UserRecord): Promise<string> {
@@ -1033,6 +1315,37 @@ export class HubApp {
       revoked_at: null,
     });
     return token;
+  }
+
+  private async ensureDefaultAgent(user: UserRecord): Promise<AgentRecord> {
+    const handle = normalizeName(user.username, "handle");
+    const existing = await this.store.getAgentByHandle(user.namespace, handle);
+    if (existing) {
+      if (existing.deleted_at) {
+        const restored = { ...existing, deleted_at: null, last_seen_at: nowIso() };
+        await this.store.updateAgent(restored);
+        return restored;
+      }
+      await this.store.touchAgent(existing.agent_id, nowIso());
+      return { ...existing, last_seen_at: nowIso() };
+    }
+    const createdAt = nowIso();
+    const agent: AgentRecord = {
+      agent_id: crypto.randomUUID(),
+      user_id: user.user_id,
+      namespace: user.namespace,
+      handle,
+      display_name: user.username,
+      description: "",
+      capabilities_json: JSON.stringify([]),
+      discoverable: "public",
+      inbox: "namespace",
+      created_at: createdAt,
+      last_seen_at: null,
+      deleted_at: null,
+    };
+    await this.store.createAgent(agent);
+    return agent;
   }
 
   private async registerAgent(principal: Principal, args: Record<string, unknown>): Promise<unknown> {
@@ -1555,6 +1868,19 @@ async function readJsonObject(request: Request): Promise<Record<string, unknown>
   return parsed;
 }
 
+async function readFormObject(request: Request): Promise<Record<string, unknown>> {
+  const text = await request.text();
+  if (byteLength(text) > JSON_LIMIT_BYTES) {
+    throw ERR.bodyTooLarge(JSON_LIMIT_BYTES);
+  }
+  const params = new URLSearchParams(text);
+  const out: Record<string, string> = {};
+  params.forEach((value, key) => {
+    out[key] = value;
+  });
+  return out;
+}
+
 function stringField(obj: Record<string, unknown>, field: string): string {
   const value = obj[field];
   if (typeof value !== "string" || value.length === 0) {
@@ -1589,6 +1915,10 @@ function arrayField(obj: Record<string, unknown>, field: string): unknown[] {
 
 function uuidField(obj: Record<string, unknown>, field: string): string {
   const value = stringField(obj, field);
+  return validateUuid(value, field);
+}
+
+function validateUuid(value: string, field: string): string {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) {
     throw ERR.schemaInvalid([`${field} must be a UUID`]);
   }
@@ -1605,6 +1935,13 @@ function ensureOnly(obj: Record<string, unknown>, allowed: string[]): void {
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function d1ChangedRows(result: unknown): number {
+  if (!isObject(result) || !isObject(result.meta)) {
+    return 0;
+  }
+  return typeof result.meta.changes === "number" ? result.meta.changes : 0;
 }
 
 function normalizeName(value: string, field: string): string {
@@ -1644,6 +1981,37 @@ function validateSummary(value: string): string {
     throw ERR.schemaInvalid([`summary must be 1-${SUMMARY_LIMIT_CHARS} characters`]);
   }
   return trimmed;
+}
+
+function validateOpaqueValue(value: string, field: string): string {
+  if (!/^[A-Za-z0-9._~-]{8,256}$/.test(value)) {
+    throw ERR.schemaInvalid([`${field} must be an opaque URL-safe value`]);
+  }
+  return value;
+}
+
+function validatePkceValue(value: string, field: string): string {
+  if (!/^[A-Za-z0-9._~-]{43,128}$/.test(value)) {
+    throw ERR.schemaInvalid([`${field} must be a PKCE base64url value`]);
+  }
+  return value;
+}
+
+function validateLoopbackRedirectUri(value: string): string {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw ERR.schemaInvalid(["loopback_redirect_uri must be a URL"]);
+  }
+  if (url.protocol !== "http:" || url.hostname !== "127.0.0.1" || url.pathname !== "/callback") {
+    throw ERR.schemaInvalid(["loopback_redirect_uri must be http://127.0.0.1:<port>/callback"]);
+  }
+  const port = Number(url.port);
+  if (!Number.isInteger(port) || port < 1 || port > 65535 || url.search || url.hash) {
+    throw ERR.schemaInvalid(["loopback_redirect_uri must include only a loopback port and /callback path"]);
+  }
+  return url.toString();
 }
 
 function discoverableValue(value: string): Discoverable {
@@ -1762,6 +2130,12 @@ async function sha256Hex(value: string): Promise<string> {
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
+async function sha256Base64Url(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  const bytes = String.fromCharCode(...new Uint8Array(digest));
+  return btoa(bytes).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
 async function pbkdf2Hash(password: string, salt: string): Promise<string> {
   return `sha256:${await sha256Hex(`pie-fefe-password:${salt}:${password}`)}`;
 }
@@ -1781,13 +2155,33 @@ function randomSecret(bytes: number): string {
   return [...raw].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-
 function nowIso(): string {
   return new Date().toISOString();
 }
 
 function addDaysIso(days: number): string {
   return new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
+}
+
+function addSecondsIso(seconds: number): string {
+  return new Date(Date.now() + seconds * 1000).toISOString();
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (char) => {
+    switch (char) {
+      case "&":
+        return "&amp;";
+      case "<":
+        return "&lt;";
+      case ">":
+        return "&gt;";
+      case '"':
+        return "&quot;";
+      default:
+        return "&#39;";
+    }
+  });
 }
 
 function byteLength(value: string): number {

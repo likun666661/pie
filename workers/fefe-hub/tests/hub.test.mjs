@@ -14,6 +14,159 @@ test("health reports protocol and version", async () => {
   assert.equal(body.protocol_version, "2025-03-26");
 });
 
+test("auth start plus exchange joins with one-time code and exact bounded shape", async () => {
+  const app = createTestApp();
+  const verifier = "v".repeat(64);
+  const state = "state_join_contract_1";
+  const loopback = "http://127.0.0.1:49152/callback";
+  const start = await authStart(app, { verifier, state, loopback });
+
+  assert.deepEqual(Object.keys(start).sort(), ["exchange_request_id", "expires_in_seconds", "login_url"]);
+  assert.equal(start.expires_in_seconds, 300);
+  assert.match(start.exchange_request_id, /^[0-9a-f-]{36}$/);
+  assert.match(start.login_url, /^https:\/\/hub\.test\/login\?req=/);
+  assert.doesNotMatch(JSON.stringify(start), /hub_agent_|hub_code_|127\.0\.0\.1|code_verifier/);
+
+  const callback = await browserLogin(app, start.exchange_request_id, state, {
+    mode: "register",
+    username: "alice",
+    namespace: "dongxu",
+    password: "alice-password-123",
+  });
+  assert.equal(callback.origin + callback.pathname, loopback);
+  assert.equal(callback.searchParams.get("state"), state);
+  const code = callback.searchParams.get("code");
+  assert.match(code, /^hub_code_/);
+
+  const wrongVerifier = await exchangeCode(app, {
+    exchange_request_id: start.exchange_request_id,
+    code,
+    state,
+    code_verifier: "w".repeat(64),
+  });
+  assert.equal(wrongVerifier.status, 401);
+  assert.doesNotMatch(JSON.stringify(await wrongVerifier.json()), /hub_agent_|hub_code_|state_join_contract_1|vvvv/);
+
+  const exchange = await exchangeJson(app, {
+    exchange_request_id: start.exchange_request_id,
+    code,
+    state,
+    code_verifier: verifier,
+  });
+  assert.deepEqual(Object.keys(exchange).sort(), [
+    "agent_id",
+    "expires_at",
+    "handle",
+    "hub_token",
+    "namespace",
+    "profile",
+    "visibility",
+  ]);
+  assert.match(exchange.agent_id, /^[0-9a-f-]{36}$/);
+  assert.equal(exchange.handle, "alice");
+  assert.equal(exchange.namespace, "dongxu");
+  assert.match(exchange.hub_token, /^hub_agent_/);
+  assert.equal(exchange.expires_at, null);
+  assert.deepEqual(exchange.profile, { display_name: "alice", description: null, capabilities: [] });
+  assert.deepEqual(exchange.visibility, { discoverable: "public", inbox: "namespace" });
+
+  const reused = await exchangeCode(app, {
+    exchange_request_id: start.exchange_request_id,
+    code,
+    state,
+    code_verifier: verifier,
+  });
+  assert.equal(reused.status, 401);
+  assert.doesNotMatch(JSON.stringify(await reused.json()), /hub_agent_|hub_code_/);
+});
+
+test("auth exchange rejects swapped state before issuing a token", async () => {
+  const app = createTestApp();
+  const verifierA = "a".repeat(64);
+  const verifierB = "b".repeat(64);
+  const startA = await authStart(app, {
+    verifier: verifierA,
+    state: "state_swap_a",
+    loopback: "http://127.0.0.1:49153/callback",
+  });
+  const startB = await authStart(app, {
+    verifier: verifierB,
+    state: "state_swap_b",
+    loopback: "http://127.0.0.1:49154/callback",
+  });
+  const callbackA = await browserLogin(app, startA.exchange_request_id, "state_swap_a", {
+    mode: "register",
+    username: "statea",
+    password: "statea-password-123",
+  });
+  const codeA = callbackA.searchParams.get("code");
+
+  const swapped = await exchangeCode(app, {
+    exchange_request_id: startA.exchange_request_id,
+    code: codeA,
+    state: "state_swap_b",
+    code_verifier: verifierA,
+  });
+  assert.equal(swapped.status, 401);
+  assert.doesNotMatch(JSON.stringify(await swapped.json()), /hub_agent_|hub_code_|state_swap_a|state_swap_b/);
+
+  const callbackB = await browserLogin(app, startB.exchange_request_id, "state_swap_b", {
+    mode: "register",
+    username: "stateb",
+    password: "stateb-password-123",
+  });
+  const exchangeB = await exchangeJson(app, {
+    exchange_request_id: startB.exchange_request_id,
+    code: callbackB.searchParams.get("code"),
+    state: "state_swap_b",
+    code_verifier: verifierB,
+  });
+  assert.match(exchangeB.hub_token, /^hub_agent_/);
+});
+
+test("auth exchange atomically consumes one-time code under replay race", async () => {
+  const app = createTestApp();
+  const verifier = "r".repeat(64);
+  const state = "state_replay_race";
+  const start = await authStart(app, {
+    verifier,
+    state,
+    loopback: "http://127.0.0.1:49155/callback",
+  });
+  const callback = await browserLogin(app, start.exchange_request_id, state, {
+    mode: "register",
+    username: "replay",
+    password: "replay-password-123",
+  });
+  const code = callback.searchParams.get("code");
+
+  const attempts = await Promise.all([
+    exchangeCode(app, {
+      exchange_request_id: start.exchange_request_id,
+      code,
+      state,
+      code_verifier: verifier,
+    }),
+    exchangeCode(app, {
+      exchange_request_id: start.exchange_request_id,
+      code,
+      state,
+      code_verifier: verifier,
+    }),
+  ]);
+
+  assert.equal(attempts.filter((response) => response.status === 200).length, 1);
+  assert.equal(attempts.filter((response) => response.status === 401).length, 1);
+  for (const response of attempts) {
+    const body = await response.json();
+    if (response.status === 200) {
+      assert.match(body.hub_token, /^hub_agent_/);
+    } else {
+      assert.doesNotMatch(JSON.stringify(body), /hub_agent_|hub_code_|state_replay_race/);
+    }
+  }
+});
+
 test("registers users and agents without storing token material in list output", async () => {
   const app = createTestApp();
   const alice = await registerUser(app, "alice");
@@ -242,6 +395,66 @@ async function registerUser(app, username) {
   );
   assert.equal(response.status, 200);
   return response.json();
+}
+
+async function authStart(app, { verifier, state, loopback }) {
+  const response = await app.fetch(
+    new Request(`${BASE}/auth/start`, {
+      method: "POST",
+      body: JSON.stringify({
+        client_kind: "pie-cli",
+        client_version: "test",
+        loopback_redirect_uri: loopback,
+        code_challenge: await pkceChallenge(verifier),
+        code_challenge_method: "S256",
+        state,
+      }),
+    }),
+  );
+  assert.equal(response.status, 200);
+  return response.json();
+}
+
+async function browserLogin(app, exchangeRequestId, state, { mode, username, namespace, password }) {
+  const form = new URLSearchParams({
+    mode,
+    username,
+    password,
+    exchange_request_id: exchangeRequestId,
+    state,
+  });
+  if (namespace) {
+    form.set("namespace", namespace);
+  }
+  const response = await app.fetch(
+    new Request(`${BASE}/login`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: form.toString(),
+    }),
+  );
+  assert.equal(response.status, 302);
+  return new URL(response.headers.get("location"));
+}
+
+async function exchangeJson(app, body) {
+  const response = await exchangeCode(app, body);
+  assert.equal(response.status, 200);
+  return response.json();
+}
+
+async function exchangeCode(app, body) {
+  return app.fetch(
+    new Request(`${BASE}/auth/exchange_code`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  );
+}
+
+async function pkceChallenge(verifier) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
+  return Buffer.from(digest).toString("base64url");
 }
 
 async function callTool(app, token, name, args) {

@@ -756,7 +756,7 @@ export class AgentMailbox {
       let delivered = 0;
       for (const writer of [...this.sessions]) {
         try {
-          const wrote = await Promise.race([writer.write(bytes).then(() => true), delay(250).then(() => false)]);
+          const wrote = await Promise.race([writer.write(bytes).then(() => true), delay(5_000).then(() => false)]);
           if (wrote) {
             delivered += 1;
           }

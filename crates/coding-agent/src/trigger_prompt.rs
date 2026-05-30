@@ -2,7 +2,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use chrono::{Duration, Utc};
-use pie_agent_core::{OnTriggerPromptHook, Session, TriggerPromptDecision, TriggerPromptRequest};
+use pie_agent_core::{
+    BeforeTriggerContext, BeforeTriggerDecision, BeforeTriggerHook, OnTriggerPromptHook, Session,
+    Trigger, TriggerPromptDecision, TriggerPromptRequest, TriggerSource,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, oneshot};
@@ -97,6 +100,130 @@ pub(crate) fn deny_hook(reason: &'static str) -> OnTriggerPromptHook {
             })
         },
     )
+}
+
+pub(crate) fn hub_trust_gate_hook() -> BeforeTriggerHook {
+    hub_trust_gate_hook_at(crate::config::base_dir().join("hub-trust.json"))
+}
+
+fn hub_trust_gate_hook_at(path: PathBuf) -> BeforeTriggerHook {
+    Arc::new(move |ctx: BeforeTriggerContext, _cancel| {
+        let path = path.clone();
+        Box::pin(async move { hub_trust_gate_decision(&path, &ctx.trigger).await })
+    })
+}
+
+async fn hub_trust_gate_decision(path: &PathBuf, trigger: &Trigger) -> BeforeTriggerDecision {
+    let binding = match HubTriggerBinding::from_trigger(trigger) {
+        Ok(Some(binding)) => binding,
+        Ok(None) => return BeforeTriggerDecision::Allow,
+        Err(reason) => {
+            return BeforeTriggerDecision::Deny {
+                reason: reason.to_string(),
+            };
+        }
+    };
+
+    let store = match load_trust_store(path).await {
+        Ok(store) => store,
+        Err(err) => {
+            return BeforeTriggerDecision::Deny {
+                reason: format!(
+                    "could not read hub trust store: {}",
+                    crate::bug_report::redact(&err)
+                ),
+            };
+        }
+    };
+    let key = HubTrustKey {
+        local_receiver_instance_id: store.local_receiver_instance_id.clone(),
+        source_scope: trigger_source_scope(&trigger.source_label),
+        receiver_agent_id: binding.receiver_agent_id,
+        sender_agent_id: binding.sender_agent_id,
+        action_class: binding.action_class,
+    };
+    let now = Utc::now();
+    if let Some(entry) = store.entries.iter().find(|entry| entry.key == key) {
+        match entry.decision.as_str() {
+            "block" => {
+                return BeforeTriggerDecision::Deny {
+                    reason: "hub sender is blocked by local trust policy".into(),
+                };
+            }
+            "always" if !entry_is_expired(entry, now) => {
+                return BeforeTriggerDecision::Allow;
+            }
+            _ => {}
+        }
+    }
+
+    BeforeTriggerDecision::Prompt {
+        reason: "new hub sender requires first-contact approval".into(),
+    }
+}
+
+#[derive(Debug)]
+struct HubTriggerBinding {
+    receiver_agent_id: String,
+    sender_agent_id: String,
+    action_class: String,
+}
+
+impl HubTriggerBinding {
+    fn from_trigger(trigger: &Trigger) -> Result<Option<Self>, &'static str> {
+        if !is_hub_agent_message_trigger(trigger) {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            receiver_agent_id: trigger_payload_uuid(trigger, &["_meta", "receiver_agent_id"])
+                .or_else(|| trigger_payload_uuid(trigger, &["receiver_agent_id"]))
+                .ok_or("hub notification is missing a valid receiver binding")?,
+            sender_agent_id: trigger_payload_uuid(trigger, &["_meta", "sender_agent_id"])
+                .or_else(|| trigger_payload_uuid(trigger, &["sender_agent_id"]))
+                .ok_or("hub notification is missing a valid sender binding")?,
+            action_class: trigger_payload_action_class(trigger, &["_meta", "action_class"])
+                .or_else(|| trigger_payload_action_class(trigger, &["action_class"]))
+                .ok_or("hub notification is missing a valid action binding")?,
+        }))
+    }
+}
+
+fn is_hub_agent_message_trigger(trigger: &Trigger) -> bool {
+    matches!(
+        &trigger.source,
+        TriggerSource::Mcp { method, .. } if method == "notifications/agent_message"
+    )
+}
+
+fn trigger_payload_uuid(trigger: &Trigger, path: &[&str]) -> Option<String> {
+    uuid_string(trigger_payload_string(trigger, path)?)
+}
+
+fn uuid_string(value: &str) -> Option<String> {
+    uuid::Uuid::parse_str(value).ok()?;
+    Some(value.to_string())
+}
+
+fn trigger_payload_action_class(trigger: &Trigger, path: &[&str]) -> Option<String> {
+    let value = trigger_payload_string(trigger, path)?;
+    (value == "notification").then_some(value.to_string())
+}
+
+fn trigger_payload_string<'a>(trigger: &'a Trigger, path: &[&str]) -> Option<&'a str> {
+    let mut value = trigger.payload.as_ref()?;
+    for key in path {
+        value = value.get(*key)?;
+    }
+    value.as_str()
+}
+
+fn entry_is_expired(entry: &HubTrustEntry, now: chrono::DateTime<Utc>) -> bool {
+    let Some(expires_at) = entry.expires_at.as_deref() else {
+        return false;
+    };
+    chrono::DateTime::parse_from_rfc3339(expires_at)
+        .map(|expires_at| expires_at.with_timezone(&Utc) <= now)
+        .unwrap_or(true)
 }
 
 async fn persist_trust_decision(
@@ -286,7 +413,10 @@ fn sender_display_from_request(request: &TriggerPromptRequest) -> String {
 
 #[cfg(test)]
 mod tests {
-    use pie_agent_core::{MemorySessionStorage, Session, SessionStorage, TriggerPromptRequest};
+    use pie_agent_core::{
+        CredentialScope, MemorySessionStorage, PayloadVisibility, ReplacementPolicy, Session,
+        SessionStorage, SourceKind, Trigger, TriggerAuthority, TriggerPromptRequest, TriggerSource,
+    };
     use std::sync::Arc;
     use tempfile::tempdir;
 
@@ -411,5 +541,136 @@ mod tests {
         );
         assert!(!audit_text.contains("hub_agent_abcdefgh"), "{audit_text}");
         assert!(!audit_text.contains("raw Local payload"), "{audit_text}");
+    }
+
+    #[tokio::test]
+    async fn hub_trust_gate_prompts_before_untrusted_hub_notification() {
+        let dir = tempdir().unwrap();
+        let trigger = hub_message_trigger();
+
+        let decision = hub_trust_gate_decision(&dir.path().join("hub-trust.json"), &trigger).await;
+
+        assert!(matches!(
+            decision,
+            BeforeTriggerDecision::Prompt { reason }
+                if reason == "new hub sender requires first-contact approval"
+        ));
+    }
+
+    #[tokio::test]
+    async fn hub_trust_gate_denies_malformed_hub_notification_binding() {
+        let dir = tempdir().unwrap();
+        let mut trigger = hub_message_trigger();
+        trigger.payload = Some(serde_json::json!({
+            "_meta": {
+                "receiver_agent_id": "hub_agent_not_a_uuid",
+                "sender_agent_id": "22222222-2222-4222-8222-222222222222",
+                "action_class": "notification",
+            },
+            "payload": { "note": "raw Local payload must not matter" },
+        }));
+
+        let decision = hub_trust_gate_decision(&dir.path().join("hub-trust.json"), &trigger).await;
+
+        assert!(matches!(
+            decision,
+            BeforeTriggerDecision::Deny { reason }
+                if reason == "hub notification is missing a valid receiver binding"
+        ));
+    }
+
+    #[tokio::test]
+    async fn hub_trust_gate_allows_or_denies_existing_trust_entries() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("hub-trust.json");
+        let trigger = hub_message_trigger();
+        let key = HubTrustKey {
+            local_receiver_instance_id: "local-instance".into(),
+            source_scope: "mcp:pie-hub".into(),
+            receiver_agent_id: "11111111-1111-4111-8111-111111111111".into(),
+            sender_agent_id: "22222222-2222-4222-8222-222222222222".into(),
+            action_class: "notification".into(),
+        };
+        write_trust_store(
+            &path,
+            &HubTrustStore {
+                version: 1,
+                local_receiver_instance_id: "local-instance".into(),
+                entries: vec![HubTrustEntry {
+                    key: key.clone(),
+                    decision: "always".into(),
+                    scope: HubTrustScope {
+                        action_class: "notification".into(),
+                    },
+                    granted_at: Utc::now().to_rfc3339(),
+                    expires_at: Some((Utc::now() + Duration::days(1)).to_rfc3339()),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+
+        let decision = hub_trust_gate_decision(&path, &trigger).await;
+        assert!(matches!(decision, BeforeTriggerDecision::Allow));
+
+        write_trust_store(
+            &path,
+            &HubTrustStore {
+                version: 1,
+                local_receiver_instance_id: "local-instance".into(),
+                entries: vec![HubTrustEntry {
+                    key,
+                    decision: "block".into(),
+                    scope: HubTrustScope {
+                        action_class: "notification".into(),
+                    },
+                    granted_at: Utc::now().to_rfc3339(),
+                    expires_at: None,
+                }],
+            },
+        )
+        .await
+        .unwrap();
+
+        let decision = hub_trust_gate_decision(&path, &trigger).await;
+        assert!(matches!(
+            decision,
+            BeforeTriggerDecision::Deny { reason }
+                if reason == "hub sender is blocked by local trust policy"
+        ));
+    }
+
+    fn hub_message_trigger() -> Trigger {
+        Trigger {
+            source: TriggerSource::Mcp {
+                server_name: "pie-hub".into(),
+                method: "notifications/agent_message".into(),
+            },
+            source_kind: SourceKind::Mcp,
+            source_label: "mcp:pie-hub".into(),
+            event_label: "notifications/agent_message".into(),
+            payload_visibility: PayloadVisibility::Local,
+            payload_summary: Some("hello".into()),
+            payload: Some(serde_json::json!({
+                "_meta": {
+                    "receiver_agent_id": "11111111-1111-4111-8111-111111111111",
+                    "sender_agent_id": "22222222-2222-4222-8222-222222222222",
+                    "action_class": "notification",
+                },
+                "sender": { "mention": "@alice@dongxu" },
+                "payload": { "note": "hub_agent_secret_should_not_be_used" },
+            })),
+            idempotency_key: "mcp:pie-hub:custom:notification-1".into(),
+            replacement_policy: ReplacementPolicy::Drop,
+            trace_id: "trace-hub".into(),
+            authority: TriggerAuthority {
+                principal_id: "mcp:pie-hub".into(),
+                principal_label: "pie-hub".into(),
+                credential_scope: CredentialScope::User,
+                allowed_source_actions: Vec::new(),
+                expires_at: None,
+            },
+            received_at: Utc::now(),
+        }
     }
 }

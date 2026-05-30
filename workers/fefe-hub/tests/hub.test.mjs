@@ -236,6 +236,9 @@ test("sends cross-namespace notification over SSE with canonical MCP metadata", 
   assert.equal(data.params.sender, "@sender@alice");
   assert.equal(data.params._meta.pie_dedup_key, send.notification_id);
   assert.equal(data.params._meta.pie_summary, "Build finished");
+  assert.equal(data.params._meta.receiver_agent_id, receiver.agent.agent_id);
+  assert.equal(data.params._meta.sender_agent_id, sender.agent.agent_id);
+  assert.equal(data.params._meta.action_class, "notification");
   assert.equal(data.params.first_contact_required, true);
   assert.equal("payload" in data.params, false);
 

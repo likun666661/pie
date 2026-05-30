@@ -87,7 +87,7 @@ This does NOT change the "no real Cloudflare in build/test CI" rule (§8). Build
 
 | §   | Title                                                          | Owner                                       | Status              |
 | --- | -------------------------------------------------------------- | ------------------------------------------- | ------------------- |
-| 1   | Architecture overview                                          | @Tools-MCP-Lead + @Runtime-dev-lead         | TBD                 |
+| 1   | Architecture overview                                          | @Tools-MCP-Lead + @Runtime-dev-lead         | **v0.1 draft**      |
 | 2   | Hub MCP protocol surface                                       | @Tools-MCP-Lead                             | **v0.1 draft**      |
 | 3   | Identity / Auth / Session / Namespace / Agent registry         | @Provider-Auth-Lead                         | **draft v0.1**      |
 | 4   | Visibility model                                               | @alice                                      | **seed draft below** |
@@ -99,11 +99,264 @@ This does NOT change the "no real Cloudflare in build/test CI" rule (§8). Build
 
 ---
 
-## §1 Architecture overview
+## §1 Architecture overview — v0.1 (@Tools-MCP-Lead + @Runtime-dev-lead)
 
-TBD — @Tools-MCP-Lead (hub MCP service model) + @Runtime-dev-lead (RFC 1 trigger pipeline reuse boundary; envelope contract with §4 / §5).
+> Status: **v0.1 draft.** Stitches §2 (MCP surface) + §5 (notification envelope)
+> + §4 (visibility) + §3 (identity/auth) into one mental model. Implementation
+> chapters are §6a (client engine contract), §6b (CLI/TUI surface), §7 (Worker),
+> §8 (release gate). Where this chapter touches the same field as a downstream
+> chapter, this chapter **cites**, never redefines.
 
-**Drafting sequence (per @Runtime-dev-lead + @Tools-MCP-Lead 2026-05-29):** §2 (MCP surface) and §5 (notification envelope) are two views of the same wire bytes; draft them first in parallel, cross-cite + co-review, then stitch §1 architecture. §3 + §6a + §6b follow. §7 Worker PR can start once §1/§2/§5 are merged, reducing the risk that the Worker author has to rework against a moving envelope.
+### §1.1 What `pie.0xfefe.me` is
+
+`pie.0xfefe.me` is a **public MCP server** that lets pie agents on different
+machines send each other notifications. Hub state lives in a Cloudflare Worker
+(`crates/agent`-external; see §7). Every API on the hub — register an agent,
+look one up, send a notification, manage the trust list — is an MCP **tool
+call**. Real-time delivery of incoming notifications is an MCP **server-push
+notification** on the SSE side of the Streamable HTTP transport
+(MCP spec 2025-03-26).
+
+Why a public MCP server, not a custom protocol:
+
+- pie agents are already MCP clients. They load MCP servers from `mcp.toml`
+  (`mcp_loader.rs`, PR #63), maintain inflight + cancel semantics
+  (`McpClient`, PR #74), and turn server-push notifications into runtime
+  `Trigger` envelopes (`McpNotificationHook`, PR #56). Reusing MCP means the
+  hub absorbs into stacks that already handle stdio MCP servers; only the
+  transport is new (§6a `HttpMcpTransport`).
+- "Define a tool / read a resource / push a notification" is exactly what the
+  hub needs to expose. Reinventing the framing inside a websocket dialect
+  would duplicate authentication, schema discipline, and cancellation that
+  MCP already standardizes.
+- LLMs already know how to call MCP tools. No second protocol for the model
+  to learn; tool descriptions in §2 are the LLM-facing API.
+
+§2 (the hub-facing MCP surface) and §5 (the runtime envelope after the client
+reads the wire) are **two views of the same wire bytes**. §2 owns the on-wire
+shape and method names; §5 owns the in-process `Trigger`. They were drafted in
+parallel under a "same wire bytes, cite don't redefine" protocol and merged as
+a pair on 2026-05-29.
+
+### §1.2 Component map
+
+```
+                    ┌──────────────────────────────────────────────┐
+                    │  pie.0xfefe.me (Cloudflare Worker, §7)       │
+                    │  ┌─────────────────────────────────────────┐ │
+                    │  │ MCP tool surface (§2 v0.1)              │ │
+                    │  │  register/profile/discover/send/inbox/  │ │
+                    │  │  ack/list_trust/revoke/block/...        │ │
+                    │  └─────────────────────────────────────────┘ │
+                    │  ┌─────────────────────────────────────────┐ │
+                    │  │ Identity / auth / namespace (§3)        │ │
+                    │  │  agent_id (UUID), agent-token, perms    │ │
+                    │  │  human session for control plane        │ │
+                    │  └─────────────────────────────────────────┘ │
+                    │  ┌─────────────────────────────────────────┐ │
+                    │  │ Visibility / inbox / trust (§4)         │ │
+                    │  │  discoverable × inbox matrix            │ │
+                    │  └─────────────────────────────────────────┘ │
+                    └──────┬───────────────────────────────────┬───┘
+                           │ HTTP POST (tools)                 │ SSE push (notifications)
+                           │ MCP Streamable HTTP transport (§6a `HttpMcpTransport`)
+                           ▼                                   ▼
+   ┌─────────────────────────────────────────────────────────────────────┐
+   │  pie client (this repository)                                       │
+   │                                                                     │
+   │  ~/.pie/mcp.toml ──► mcp_loader.rs (PR #63) ──► McpClient (PR #35)  │
+   │                                                          │          │
+   │                                                          ▼          │
+   │              McpNotificationHook (PR #56, configured as              │
+   │              `make_pie_hub_notification_hook`, §5.1)                 │
+   │                                                          │          │
+   │                                                          ▼          │
+   │                                              Trigger envelope (§5.4) │
+   │                                                          │          │
+   │                                                          ▼          │
+   │           register_notification_hook supervisor (RFC 1 sub-PR 3)     │
+   │                                                          │          │
+   │                                                          ▼          │
+   │              BeforeTriggerHook (RFC 1 sub-PR 4)                      │
+   │              ─ first-contact gate via issue #110                     │
+   │                Prompt channel (§5.6, ~/.pie/hub-trust.json §5.7)     │
+   │                                                          │          │
+   │                                                          ▼          │
+   │                           handle_trigger (RFC 1 sub-PR 2)            │
+   │                                  │                                   │
+   │                                  ▼                                   │
+   │                       sub-agent fork (RFC 1 sub-PR 5a) → main loop  │
+   │                       + Custom audit (fefe_trust_decision §5.7,      │
+   │                         trigger_prompt #110 Artifact E)              │
+   └─────────────────────────────────────────────────────────────────────┘
+
+   CLI / TUI surface (§6b)               Release gate (§8)
+     /hub login | register | rotate        CI deploy via GitHub Actions
+     /hub trust | block | list             repo secret CF_API_KEY
+     /skills install ... (reused)          deployed-worker e2e
+```
+
+The diagram is read top-to-bottom for **inbound** (hub → client) and
+left-to-right for **outbound** (client → hub via tool calls). Identity (§3)
+and visibility (§4) sit on the hub because authorization decisions happen
+where state lives; the client is unprivileged.
+
+### §1.3 Wire-bytes lifecycle — a single notification, end to end
+
+A notification from sender `@alice@dongxu` to receiver `@bob@evil-corp` walks
+through every component on the path:
+
+1. **Sender side (out).** `@alice`'s pie session calls the hub MCP tool
+   `send_notification` (§2.3) over `HttpMcpTransport` (§6a). The request body
+   is bounded ≤ 16 KiB (§2.7) and carries the receiver's `agent_id` (UUID,
+   §3.3) plus a bounded `_meta.pie_summary` (§2.5) and optional payload.
+2. **Hub side (auth + fan-out).** The Worker authorizes against the sender's
+   agent token (`notification:send` per §3.3) and re-checks the receiver's
+   `inbox` policy (§4.2). For an `inbox=open` receiver with cross-namespace
+   sender and no prior trust record, the hub queues a notification for the
+   receiver and emits it on the receiver's SSE channel as
+   `notifications/agent_message` (§2.5). For `inbox=closed` or `block`-list
+   matches, the hub returns a bounded `permission_denied` / silent-drop per
+   §4.2.
+3. **Wire transit.** The notification frame travels over the SSE side of the
+   already-open Streamable HTTP transport. Wire shape is owned by §2.5; field
+   names like `_meta.pie_dedup_key` and `_meta.pie_summary` are canonical per
+   PR #56 (`McpNotificationHook` convention) and cited from both chapters.
+4. **Client read pump.** `McpClient` (PR #35) reads the SSE frame and emits
+   on the `take_notifications()` mpsc outlet.
+5. **Wire → Trigger boundary (§5.1).** A `McpNotificationHook` configured via
+   the `make_pie_hub_notification_hook` factory (§5.1, Runtime-side; **no new
+   hook trait**) reads the notification, maps wire fields to the runtime
+   `Trigger` envelope (§5.4), and computes `TriggerAuthority` per §5.3
+   (`principal_id = agent_id` UUID, `principal_label = @handle@namespace`).
+   The raw payload is discarded at this boundary; only the bounded
+   `_meta.pie_summary` survives (§5.4 `payload: None`).
+6. **Supervisor admission.** `register_notification_hook` (RFC 1 sub-PR 3)
+   accepts the `Trigger` and runs the standard pre-handle gates: dedup
+   (§5.5), cycle suppression, and `BeforeTriggerHook`.
+7. **First-contact gate (§5.6, #110).** `HubTrustGate` (Runtime-side, §5.6)
+   looks up `~/.pie/hub-trust.json` (§5.7) keyed on
+   `{receiver_agent_id, sender_agent_id, action_class=notification}`. On a
+   miss for a cross-namespace sender, the runtime emits
+   `HarnessEvent::TriggerPromptRequest` (#110 Artifact D, v0.2). The
+   embedder renders a prompt card (§6b) — same UX shape as the
+   `ControlPlaneWrite` prompt the rest of the runtime already uses for
+   `InstallSkill` / `SetSkillState` (#110 Artifact C). User picks
+   `Accept once` / `Always` / `Block`. `Always` persists to
+   `~/.pie/hub-trust.json` via embedder code; runtime stays remember-agnostic
+   (#110 v0.2).
+8. **Admit + audit.** On `Allow`, `handle_trigger` (RFC 1 sub-PR 2) advances
+   the envelope. Audit records: `trigger_prompt` (runtime, per resolution,
+   #110 Artifact E) and `fefe_trust_decision` (embedder, only on cache
+   change, §5.7) — complementary, not duplicate. Both follow the same
+   redaction rule: no raw payload, no token, no internal binding name.
+9. **Main loop or sub-agent.** `handle_trigger` either advances the main
+   loop or spawns a sub-agent fork (RFC 1 sub-PR 5a). The sub-agent has the
+   bounded `payload_summary` and `TriggerAuthority`; it cannot read the
+   raw hub body.
+
+Every step cites the chapter that owns the transformation. No step is novel
+to the hub; the hub adds **two** runtime artifacts on top of the RFC 1
+trigger pipeline: the `make_pie_hub_notification_hook` factory (§5.1, pure
+configuration of an existing hook) and `HubTrustGate` as a
+`BeforeTriggerHook` implementation (§5.6). The rest is reuse.
+
+### §1.4 Trigger pipeline reuse — what's runtime, what's hub-specific
+
+The §1.3 lifecycle reads like the hub is a first-class runtime concern. It is not. **The Runtime side of this RFC introduces no new hook trait, no new pipeline, no new envelope, and no new audit machinery.** What it adds is two small things that plug into existing slots: a *configured instance* of `McpNotificationHook` and a `BeforeTriggerHook` implementation. Everything else cited in §1.3 is already on `main` from RFC 1 (issue #20) and the MCP adapter chain (PRs #35 / #56 / #61 / #62 / #63).
+
+Concretely, the Runtime-side delta:
+
+```
+                                    ┌──────────────────────────────┐
+                                    │  pre-existing on main today  │
+                                    │  (RFC 1 + MCP adapter chain) │
+                                    │                              │
+   hub-pushed MCP notification ──►  │  McpNotificationHook  ────►  │  Trigger envelope
+   (over HttpMcpTransport §6a)      │  (PR #56)                    │  (RFC 1 issue #20)
+                                    │       ▲                      │
+                                    │       │ configured by        │
+                                    └───────│──────────────────────┘
+                                            │
+                                    ┌───────│──────────────────────┐
+                                    │  new in RFC #18 — Runtime    │
+                                    │                              │
+                                    │  make_pie_hub_notification_  │
+                                    │    hook(source_kind_prefix=  │
+                                    │       "pie-hub")             │
+                                    │       │                      │
+                                    │       ▼                      │
+                                    │  factory returns a           │
+                                    │  configured McpNotification- │
+                                    │  Hook — no new trait impl    │
+                                    └──────────────────────────────┘
+
+   Trigger envelope  ──────────────►  register_notification_hook supervisor
+                                      (RFC 1 sub-PR 3, PR #61)        │
+                                                                      │
+                                      BeforeTriggerHook slot          │
+                                      (RFC 1 sub-PR 4, PR #62)        │
+                                                ▲                     │
+                                                │ filled by           │
+                                    ┌───────────│─────────────────────┘
+                                    │  new in RFC #18 — Runtime
+                                    │
+                                    │  HubTrustGate (§5.6)
+                                    │   - reads ~/.pie/hub-trust.json
+                                    │   - on miss for cross-namespace,
+                                    │     returns BeforeTriggerDecision::
+                                    │     Prompt + emits TriggerPrompt-
+                                    │     Request (#110 Artifact D)
+                                    └────────────────────────────────────
+```
+
+That is the entire Runtime-side surface this RFC introduces. Specifically:
+
+- **`make_pie_hub_notification_hook(source_kind_prefix: "pie-hub") -> DynNotificationHook`** is **pure configuration** of `McpNotificationHook`. It pins the source-label namespace (§5.2) and gives the supervisor a stable identity to mount the hub adapter under. Zero new trait code; this is the same shape as a fresh `mcp.toml` row enabling a new stdio MCP server. Adding a second deployment (e.g. staging) is one more factory call with a different `source_kind_prefix`.
+- **`HubTrustGate`** is the one *new implementation* RFC #18 adds on the Runtime side. It implements the existing `BeforeTriggerHook` trait (already declared in RFC 1 sub-PR 4) by consulting an embedder-owned trust file. It does not invent a Prompt protocol — it returns `BeforeTriggerDecision::Prompt` and the runtime translates that into `HarnessEvent::TriggerPromptRequest` per the #110 v0.2 Artifact D channel, which the embedder resolves through the same UI shape that `InstallSkill` / `SetSkillState(enabled=true)` use. One channel, two binding shapes (`tool_call_id + args_hash` for tools; `trigger_prompt_id` for triggers — see #110 §A2 / §A3).
+- **Trust persistence** (`~/.pie/hub-trust.json`) lives **entirely on the embedder side** per §5.7 and #110 v0.2. Runtime is remember-agnostic: the trust file is just a JSON the embedder reads in `HubTrustGate` and writes when the user picks `Always`. Runtime never touches it. This mirrors how `~/.pie/skills-state.json` (issue #23) works for skill enable/disable overlays.
+- **Audit reuse** — every persistence point in the §1.3 lifecycle goes through the existing `Session::append_custom` channel (RFC 1 sub-PR 2, PR #59). The only new `custom_type`s are `fefe_trust_decision` (defined in §5.7, written by embedder) and `trigger_prompt` (defined in #110 Artifact E, written by runtime). They follow the same redaction rule as the existing `trigger_audit` / `trigger_result` / `trigger_promotion` entries: no raw payload, no tokens, no internal binding names.
+
+What this means for the §7 Worker implementation owner and for §6a / §6b: **the Runtime side does not gate the hub's wire shape, error vocabulary, or transport semantics.** The §2 / §5 protocol locked the wire and the envelope; the hub MCP server author can build, deploy, and version the Worker without further Runtime sign-off as long as `notifications/agent_message` carries `_meta.pie_dedup_key` and `_meta.pie_summary` per the existing `McpNotificationHook` convention (PR #56). The only Runtime-side prerequisite for shipping is that issue #110 has landed (without it, `HubTrustGate` falls back to fail-closed deny on cross-namespace — see §5.OQ-6).
+
+Implementation-side, this is the §1 → §1.5 → sub-PR sequencing: the four reuse rows in the §1.5 ledger are zero-code citations in the implementation PR; the four "new" rows on the Runtime side (`make_pie_hub_notification_hook`, `HubTrustGate`, `~/.pie/hub-trust.json` schema, `fefe_trust_decision` Custom audit) collectively fit in roughly 400 LoC of `crates/agent` Rust plus tests, all behind §5 / §5.7 / #110 v0.2 design contracts already on `main` or in flight.
+
+### §1.5 Reuse-vs-new ledger
+
+This table is the implementation guide. "Reuse" means the implementation PR
+**cites** the existing code; "New" means the implementation PR **writes**
+new code on top of stable interfaces.
+
+| Component                          | Status                | Source / new location                                                   |
+| ---------------------------------- | --------------------- | ----------------------------------------------------------------------- |
+| MCP **Streamable HTTP transport** (POST + SSE) | **New** (§6a) | `crates/mcp` — `HttpMcpTransport` alongside the existing `StdioTransport` |
+| `~/.pie/mcp.toml` hub entry        | **New** (§6a)         | `mcp_loader.rs` — one extra table row; same config shape as stdio       |
+| `mcp_loader::connect_one`          | Reuse — PR #63        | Adds hub server type alongside stdio; no API change                     |
+| `McpClient` (inflight, cancel, read pump) | Reuse — PR #35 + PR #74 | Same client, new transport plug                                          |
+| `McpNotificationHook`              | Reuse — PR #56        | Configured via `make_pie_hub_notification_hook` factory (§5.1)          |
+| `register_notification_hook` supervisor | Reuse — RFC 1 sub-PR 3 (PR #61) | No change                                                                |
+| `Trigger` envelope + `TriggerAuthority` | Reuse — RFC 1 issue #20 | `principal_id`/`principal_label` mapping per §5.3                       |
+| `BeforeTriggerHook` slot           | Reuse — RFC 1 sub-PR 4 (PR #62) | New impl `HubTrustGate` (§5.6, Runtime-side; lives in `crates/agent`) |
+| First-contact prompt UI channel    | Reuse — **issue #110** | `BeforeToolCallResult::Prompt` parallel channel for triggers per #110 Artifact D (v0.2) |
+| `~/.pie/hub-trust.json` (trust list) | **New** (§5.7)        | Embedder-owned; runtime never writes (#110 v0.2 separation)              |
+| `fefe_trust_decision` Custom audit | **New** (§5.7)        | `SessionTreeEntry::Custom { custom_type = "fefe_trust_decision" }`      |
+| `trigger_prompt` Custom audit      | **New** (#110 Artifact E) | Runtime emits per prompt resolution                                       |
+| `~/.pie/control-plane-trust.json` (skills/triggers Always cache) | **New** (#110 v0.2) | Parallel to `hub-trust.json`, embedder-owned                              |
+| `handle_trigger`                   | Reuse — RFC 1 sub-PR 2 (PR #59) | No change                                                                |
+| Sub-agent fork on admitted trigger | Reuse — RFC 1 sub-PR 5a (PR #64) | No change                                                                |
+| `payload_visibility = Local` default | Reuse — RFC 1 Trigger envelope types | Hub MUST set Local; sender opts into Shared explicitly                   |
+| Hub identity / auth / namespace    | **New** (§3, §7)      | Worker-side; agent-token model, no provider-credential proxy             |
+| Hub visibility / inbox / trust     | **New** (§4, §7)      | Worker-side; discoverable × inbox matrix                                  |
+| MCP error code namespace `-32000…-32010` (§2.6) | **New** (§2.6) | Hub returns; client surfaces recovery action only                        |
+| CLI/TUI `/hub *` slash commands    | **New** (§6b)         | Wraps `mcp_loader` + `~/.pie/hub-trust.json` editing                    |
+| CI deploy via GitHub Actions       | **New** (§8)          | Repo secret `CF_API_KEY`; protected env; deployed-worker e2e             |
+
+Operative rule: **no implementation PR introduces a new runtime trait or
+extends `pie-agent-core` beyond what RFC 1 already shipped.** The hub work
+adds one transport (`HttpMcpTransport`), one factory call
+(`make_pie_hub_notification_hook`), one `BeforeTriggerHook` impl
+(`HubTrustGate`), two Custom audit types, two `~/.pie/*.json` files, and the
+Worker. Everything else is configuration.
 
 ## §2 Hub MCP protocol surface — v0.1 (@Tools-MCP-Lead)
 
@@ -1132,3 +1385,5 @@ Owned by @QA-Release-Lead in §8. Required contents:
 | 2026-05-29 | @Tools-MCP-Lead | §2 v0.1: Hub MCP protocol surface — overview, versioning, tools (control-plane / discovery / messaging / trust-block), resources, server-push notifications, error codes, body caps + rate limits, §2 × §5 cross-cite, open questions. |
 | 2026-05-29 | @Tools-MCP-Lead | §2 v0.1 follow-up (per @Provider-Auth-Lead direction on §3 ↔ §2 alignment): added `§3 permission` column to §2.3 tool tables citing `agent:*` / `notification:*` / `token:*` / `trust:*` names; added `-32009 auth_required` and `-32010 auth_invalid` to §2.6; renamed `-32000 invalid_session` → `session_expired` and `-32005 token_revoked` → `auth_revoked` and `-32003 unknown_agent` → `not_found` to match §3.5 vocabulary; changed `retry_after_secs` → `retry_after_ms` in §2.6/§2.7; added 240-char vs 4 KiB cap-layering clarification on `pie_summary` (§2.5); refined `principal_id` / `principal_label` wire-vs-runtime framing in §2.8 (per Runtime cross-cite review on PR #127). |
 | 2026-05-29 | @Provider-Auth-Lead | §3 v0.1: identity/auth/session/namespace/agent registry draft. Added credential class separation, human session requirements, agent token lifecycle, per-call authorization rules, bounded auth errors, audit/redaction rules, threat-model checkpoints, and §3 open questions. |
+| 2026-05-29 | @Tools-MCP-Lead | §1 v0.1 partial (§1.1 framing / §1.2 ASCII component map / §1.3 9-step wire-bytes lifecycle / §1.5 reuse-vs-new ledger). Stitches §2 + §5 + §4 + §3 into one mental model. §1.5 ledger pins the operative rule: no implementation PR introduces a new runtime trait beyond what RFC 1 shipped — the hub work adds one transport (`HttpMcpTransport`), one factory (`make_pie_hub_notification_hook`), one `BeforeTriggerHook` impl (`HubTrustGate`), two Custom audit types, two `~/.pie/*.json` files, and the Worker; everything else is configuration. §1.4 placeholder calls out @Runtime-dev-lead. |
+| 2026-05-29 | @Runtime-dev-lead | §1.4 trigger pipeline reuse — Runtime side. Diagrams the pre-existing-on-`main` vs new-in-RFC #18 split on the runtime boundary; pins the "no new hook trait, no new pipeline, no new envelope, no new audit machinery" rule; lists the four Runtime-side new things (`make_pie_hub_notification_hook` factory, `HubTrustGate` impl, `~/.pie/hub-trust.json` schema, `fefe_trust_decision` Custom audit) and confirms the §1 → §1.5 → sub-PR sequencing fits ~400 LoC of `crates/agent` delta plus tests. §1 v0.1 chapter complete. |

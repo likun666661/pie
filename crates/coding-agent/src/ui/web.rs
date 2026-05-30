@@ -230,9 +230,14 @@ impl App {
                     self.start_compaction_turn(custom, turn);
                 }
             }
-            CommandOutcome::LoginSecret { provider } => {
+            CommandOutcome::LoginSecret {
+                provider,
+                recovery_command,
+                ..
+            } => {
+                let command = recovery_command.unwrap_or_else(|| format!("/login {provider}"));
                 self.error_line(format!(
-                    "web login is not implemented yet; run `/login {provider}` from the terminal UI"
+                    "web login is not implemented yet; run `{command}` from the terminal UI"
                 ));
             }
             CommandOutcome::Handled => {}

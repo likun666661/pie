@@ -48,6 +48,9 @@ mod goal;
 #[path = "../src/history.rs"]
 mod history;
 #[allow(dead_code)]
+#[path = "../src/mcp_loader.rs"]
+mod mcp_loader;
+#[allow(dead_code)]
 #[path = "../src/session/mod.rs"]
 mod session;
 #[allow(dead_code)]
@@ -1253,7 +1256,15 @@ async fn dispatch_login_prompts_for_secret_instead_of_accepting_inline_key() {
 
     let outcome = commands::dispatch("/login ds4", &registry, &ctx).await;
     match outcome {
-        commands::CommandOutcome::LoginSecret { provider } => assert_eq!(provider, "ds4"),
+        commands::CommandOutcome::LoginSecret {
+            provider,
+            storage_key,
+            recovery_command,
+        } => {
+            assert_eq!(provider, "ds4");
+            assert!(storage_key.is_none());
+            assert!(recovery_command.is_none());
+        }
         other => panic!("expected LoginSecret outcome, got {other:?}"),
     }
 }
@@ -1291,6 +1302,7 @@ async fn dispatch_login_rejects_inline_secret_material() {
 
 #[tokio::test]
 async fn save_api_key_persists_without_printing_secret_material() {
+    let _auth_guard = auth::ENV_LOCK.lock().unwrap();
     let _guard = PIE_DIR_ENV_LOCK.lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let _pie_dir = EnvGuard::set("PIE_DIR", temp.path());
@@ -1304,6 +1316,262 @@ async fn save_api_key_persists_without_printing_secret_material() {
         auth::ProviderCredential::ApiKey { value } => assert_eq!(value, secret),
         other => panic!("unexpected credential kind: {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn dispatch_hub_connect_rejects_secret_bearing_endpoint_without_echo() {
+    let _auth_guard = auth::ENV_LOCK.lock().unwrap();
+    let _pie_guard = PIE_DIR_ENV_LOCK.lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let _pie_dir = EnvGuard::set("PIE_DIR", temp.path());
+    let secret = "hub_agent_url_secret_should_not_leak";
+
+    let storage = Arc::new(MemorySessionStorage::new());
+    let session = Session::new(storage as Arc<dyn SessionStorage>);
+    let opts = AgentHarnessOptions::new(faux_model(), session);
+    let harness = Arc::new(AgentHarness::new(opts));
+
+    let registry = commands::Registry::with_builtins();
+    let cwd = std::env::current_dir().unwrap();
+    let ctx = commands::CommandCtx {
+        harness: &harness,
+        session_id: "test-hub-connect-secret-endpoint",
+        log_path: None,
+        tool_count: 0,
+        cwd: &cwd,
+    };
+
+    let outcome = commands::dispatch(
+        &format!("/hub connect --endpoint https://pie.0xfefe.me/mcp?token={secret}"),
+        &registry,
+        &ctx,
+    )
+    .await;
+    match outcome {
+        commands::CommandOutcome::Error(message) => {
+            assert!(message.contains("must not include query"), "{message}");
+            assert!(!message.contains(secret), "{message}");
+        }
+        other => panic!("expected Error outcome, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn dispatch_hub_connect_unknown_args_do_not_echo_token_like_text() {
+    let secret = "hub_agent_arg_secret_should_not_leak";
+    let storage = Arc::new(MemorySessionStorage::new());
+    let session = Session::new(storage as Arc<dyn SessionStorage>);
+    let opts = AgentHarnessOptions::new(faux_model(), session);
+    let harness = Arc::new(AgentHarness::new(opts));
+
+    let registry = commands::Registry::with_builtins();
+    let cwd = std::env::current_dir().unwrap();
+    let ctx = commands::CommandCtx {
+        harness: &harness,
+        session_id: "test-hub-connect-unknown-arg",
+        log_path: None,
+        tool_count: 0,
+        cwd: &cwd,
+    };
+
+    let outcome = commands::dispatch(&format!("/hub connect {secret}"), &registry, &ctx).await;
+    match outcome {
+        commands::CommandOutcome::Error(message) => {
+            assert!(
+                message.contains("unknown option for /hub connect"),
+                "{message}"
+            );
+            assert!(!message.contains(secret), "{message}");
+        }
+        other => panic!("expected Error outcome, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn dispatch_hub_connect_parse_errors_do_not_echo_malformed_config() {
+    let _auth_guard = auth::ENV_LOCK.lock().unwrap();
+    let _pie_guard = PIE_DIR_ENV_LOCK.lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let _pie_dir = EnvGuard::set("PIE_DIR", temp.path());
+    let secret = "hub_agent_bad_toml_secret_should_not_leak";
+    std::fs::write(
+        temp.path().join("mcp.toml"),
+        format!("this is not toml = \"{secret}\"\n[[server]]\n"),
+    )
+    .unwrap();
+
+    let storage = Arc::new(MemorySessionStorage::new());
+    let session = Session::new(storage as Arc<dyn SessionStorage>);
+    let opts = AgentHarnessOptions::new(faux_model(), session);
+    let harness = Arc::new(AgentHarness::new(opts));
+
+    let registry = commands::Registry::with_builtins();
+    let cwd = std::env::current_dir().unwrap();
+    let ctx = commands::CommandCtx {
+        harness: &harness,
+        session_id: "test-hub-connect-bad-config",
+        log_path: None,
+        tool_count: 0,
+        cwd: &cwd,
+    };
+
+    let outcome = commands::dispatch("/hub connect", &registry, &ctx).await;
+    match outcome {
+        commands::CommandOutcome::Error(message) => {
+            assert!(message.contains("unable to parse mcp config"), "{message}");
+            assert!(!message.contains(secret), "{message}");
+            assert!(!message.contains("[[server]]"), "{message}");
+        }
+        other => panic!("expected Error outcome, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn dispatch_hub_connect_writes_streamable_http_config_without_token_output() {
+    let _auth_guard = auth::ENV_LOCK.lock().unwrap();
+    let _pie_guard = PIE_DIR_ENV_LOCK.lock().unwrap();
+    let _output_guard = COMMAND_OUTPUT_LOCK.lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let _pie_dir = EnvGuard::set("PIE_DIR", temp.path());
+    let capture = OutputCapture::install();
+
+    let storage = Arc::new(MemorySessionStorage::new());
+    let session = Session::new(storage as Arc<dyn SessionStorage>);
+    let opts = AgentHarnessOptions::new(faux_model(), session);
+    let harness = Arc::new(AgentHarness::new(opts));
+
+    let registry = commands::Registry::with_builtins();
+    let cwd = std::env::current_dir().unwrap();
+    let ctx = commands::CommandCtx {
+        harness: &harness,
+        session_id: "test-hub-connect",
+        log_path: None,
+        tool_count: 0,
+        cwd: &cwd,
+    };
+
+    let outcome = commands::dispatch("/hub connect", &registry, &ctx).await;
+    assert!(matches!(outcome, commands::CommandOutcome::Handled));
+    let text = capture.text();
+    assert!(text.contains("hub configured"), "{text}");
+    assert!(!text.contains("pie-hub:default"), "{text}");
+    assert!(!text.contains("hub_agent_"), "{text}");
+
+    let config_text = std::fs::read_to_string(temp.path().join("mcp.toml")).unwrap();
+    assert!(
+        config_text.contains("kind = \"streamable_http\""),
+        "{config_text}"
+    );
+    assert!(
+        config_text.contains("endpoint = \"https://pie.0xfefe.me/mcp\""),
+        "{config_text}"
+    );
+    assert!(
+        config_text.contains("token_keychain_ref = \"pie-hub:default\""),
+        "{config_text}"
+    );
+}
+
+#[tokio::test]
+async fn dispatch_hub_login_uses_secret_prompt_path() {
+    let storage = Arc::new(MemorySessionStorage::new());
+    let session = Session::new(storage as Arc<dyn SessionStorage>);
+    let opts = AgentHarnessOptions::new(faux_model(), session);
+    let harness = Arc::new(AgentHarness::new(opts));
+
+    let registry = commands::Registry::with_builtins();
+    let cwd = std::env::current_dir().unwrap();
+    let ctx = commands::CommandCtx {
+        harness: &harness,
+        session_id: "test-hub-login",
+        log_path: None,
+        tool_count: 0,
+        cwd: &cwd,
+    };
+
+    let outcome = commands::dispatch("/hub login", &registry, &ctx).await;
+    match outcome {
+        commands::CommandOutcome::LoginSecret {
+            provider,
+            storage_key,
+            recovery_command,
+        } => {
+            assert_eq!(provider, "pie-hub");
+            assert_eq!(storage_key.as_deref(), Some("pie-hub:default"));
+            assert_eq!(recovery_command.as_deref(), Some("/hub login"));
+        }
+        other => panic!("expected LoginSecret outcome, got {other:?}"),
+    }
+}
+
+#[test]
+fn hub_status_error_redacts_token_like_text() {
+    let secret = "hub_agent_status_error_secret_should_not_leak";
+    let session = "hub_hs_status_error_secret_should_not_leak";
+    let message = commands::redact_hub_status_text(&format!(
+        "transport failed with Authorization: Bearer {secret}; session={session}; bare={secret}"
+    ));
+    assert!(message.contains("[REDACTED"), "{message}");
+    assert!(!message.contains(secret), "{message}");
+    assert!(!message.contains(session), "{message}");
+    assert!(!message.contains("Bearer hub_agent"), "{message}");
+    assert!(!message.contains("hub_agent_"), "{message}");
+    assert!(!message.contains("hub_hs_"), "{message}");
+}
+
+#[tokio::test]
+async fn dispatch_hub_status_redacts_token_and_token_ref() {
+    let _auth_guard = auth::ENV_LOCK.lock().unwrap();
+    let _pie_guard = PIE_DIR_ENV_LOCK.lock().unwrap();
+    let _output_guard = COMMAND_OUTPUT_LOCK.lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let _pie_dir = EnvGuard::set("PIE_DIR", temp.path());
+    let capture = OutputCapture::install();
+
+    std::fs::write(
+        temp.path().join("mcp.toml"),
+        r#"
+[[server]]
+name = "pie-hub"
+kind = "streamable_http"
+endpoint = "https://pie.0xfefe.me/mcp"
+auth = { kind = "bearer", token_keychain_ref = "pie-hub:default" }
+"#,
+    )
+    .unwrap();
+    let secret = "hub_agent_status_secret_should_not_leak";
+    let mut store = auth::AuthStore::default();
+    store.set(
+        "pie-hub:default",
+        auth::ProviderCredential::ApiKey {
+            value: secret.into(),
+        },
+    );
+    store.save().unwrap();
+
+    let storage = Arc::new(MemorySessionStorage::new());
+    let session = Session::new(storage as Arc<dyn SessionStorage>);
+    let opts = AgentHarnessOptions::new(faux_model(), session);
+    let harness = Arc::new(AgentHarness::new(opts));
+
+    let registry = commands::Registry::with_builtins();
+    let cwd = std::env::current_dir().unwrap();
+    let ctx = commands::CommandCtx {
+        harness: &harness,
+        session_id: "test-hub-status",
+        log_path: None,
+        tool_count: 0,
+        cwd: &cwd,
+    };
+
+    let outcome = commands::dispatch("/hub status", &registry, &ctx).await;
+    assert!(matches!(outcome, commands::CommandOutcome::Handled));
+    let text = capture.text();
+    assert!(text.contains("endpoint      pie.0xfefe.me"), "{text}");
+    assert!(text.contains("credential    stored"), "{text}");
+    assert!(!text.contains(secret), "{text}");
+    assert!(!text.contains("pie-hub:default"), "{text}");
+    assert!(!text.contains("Authorization"), "{text}");
 }
 
 #[tokio::test]
@@ -1497,6 +1765,7 @@ async fn dispatch_skill_refuses_disabled_skill() {
 
 #[tokio::test]
 async fn dispatch_skills_disable_persists_overlay_and_reloads() {
+    let _auth_guard = auth::ENV_LOCK.lock().unwrap();
     let _guard = PIE_DIR_ENV_LOCK.lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let _pie_dir = EnvGuard::set("PIE_DIR", temp.path());
@@ -1550,6 +1819,7 @@ async fn dispatch_skills_disable_persists_overlay_and_reloads() {
 
 #[tokio::test]
 async fn dispatch_skills_enable_is_user_mediated_and_reuses_overlay() {
+    let _auth_guard = auth::ENV_LOCK.lock().unwrap();
     let _guard = PIE_DIR_ENV_LOCK.lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let _pie_dir = EnvGuard::set("PIE_DIR", temp.path());
@@ -1671,6 +1941,7 @@ async fn dispatch_skills_reload_uses_harness_reload_and_prints_summary() {
 
 #[tokio::test]
 async fn dispatch_skills_install_previews_then_confirms_without_body_echo() {
+    let _auth_guard = auth::ENV_LOCK.lock().unwrap();
     let _env_guard = PIE_DIR_ENV_LOCK.lock().unwrap();
     let _output_guard = COMMAND_OUTPUT_LOCK.lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
@@ -1730,6 +2001,7 @@ async fn dispatch_skills_install_previews_then_confirms_without_body_echo() {
 
 #[tokio::test]
 async fn dispatch_skills_remove_previews_then_confirms_user_skill() {
+    let _auth_guard = auth::ENV_LOCK.lock().unwrap();
     let _env_guard = PIE_DIR_ENV_LOCK.lock().unwrap();
     let _output_guard = COMMAND_OUTPUT_LOCK.lock().unwrap();
     let temp = tempfile::tempdir().unwrap();

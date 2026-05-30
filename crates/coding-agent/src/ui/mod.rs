@@ -855,8 +855,13 @@ impl App {
                     self.start_compaction_turn(custom, turn);
                 }
             }
-            CommandOutcome::LoginSecret { provider } => {
-                self.login(&provider, terminal).await;
+            CommandOutcome::LoginSecret {
+                provider,
+                storage_key,
+                recovery_command: _,
+            } => {
+                self.login(&provider, storage_key.as_deref(), terminal)
+                    .await;
             }
             CommandOutcome::Handled => {}
         }
@@ -911,6 +916,7 @@ impl App {
     async fn login(
         &mut self,
         provider: &str,
+        storage_key: Option<&str>,
         terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     ) {
         // rpassword needs a cooked terminal with echo control, so drop out of the full-screen
@@ -923,7 +929,7 @@ impl App {
             Ok(token) if token.trim().is_empty() => {
                 self.error_line("empty api key; login cancelled")
             }
-            Ok(token) => match commands::save_api_key(provider, &token) {
+            Ok(token) => match commands::save_api_key(storage_key.unwrap_or(provider), &token) {
                 Ok(path) => self.system_line(format!(
                     "saved api key for `{provider}` to {}",
                     path.display()
@@ -1624,8 +1630,18 @@ impl App {
                 match commands::dispatch(input, &self.registry, &ctx).await {
                     CommandOutcome::Quit => break,
                     CommandOutcome::Error(e) => eprintln!("error: {e}"),
-                    CommandOutcome::LoginSecret { provider } => {
-                        eprintln!("error: {}", crate::login_requires_tty_message(&provider));
+                    CommandOutcome::LoginSecret {
+                        provider,
+                        recovery_command,
+                        ..
+                    } => {
+                        eprintln!(
+                            "error: {}",
+                            crate::login_requires_tty_message(
+                                &provider,
+                                recovery_command.as_deref()
+                            )
+                        );
                     }
                     CommandOutcome::RunAgentPrompt {
                         prompt,
@@ -2748,11 +2764,20 @@ mod tests {
 
     #[test]
     fn login_requires_tty_message_is_bounded_and_secret_free() {
-        let msg = crate::login_requires_tty_message("ds4");
+        let msg = crate::login_requires_tty_message("ds4", None);
         assert!(msg.contains("interactive terminal"));
         assert!(msg.contains("/login ds4"));
         assert!(!msg.contains("api key for"));
         assert!(!msg.contains("sk-"));
+    }
+
+    #[test]
+    fn login_requires_tty_message_accepts_hub_specific_recovery() {
+        let msg = crate::login_requires_tty_message("pie-hub", Some("/hub login"));
+        assert!(msg.contains("interactive terminal"));
+        assert!(msg.contains("/hub login"));
+        assert!(!msg.contains("/login pie-hub"));
+        assert!(!msg.contains("pie-hub:default"));
     }
 
     #[test]

@@ -55,6 +55,10 @@ versions sync across all workspace crates per the lockstep policy in `AGENTS.md`
   accepting `/login <provider> <api-key>` inline. Inline keys are rejected with a usage
   message that does not repeat the secret, preventing interactive terminal scrollback from
   retaining raw credential material.
+- Added the first `/hub` client commands for `pie.0xfefe.me`: `/hub connect` writes the
+  canonical `streamable_http` MCP entry, `/hub login` stores the hub token through the
+  existing no-echo secret prompt, `/hub status` renders bounded local config/auth/hook
+  state, and `/hub logout` clears the local hub credential without printing token refs.
 - **#66** `/triggers` slash command for the RFC 1 trigger surface. It now shows runtime
   counters, hook health, running trigger actions, recent trigger audit rows, and supports
   aborting one or all in-flight trigger actions from the terminal while rendering only

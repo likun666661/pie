@@ -136,6 +136,8 @@ static REDACTORS: Lazy<Vec<(&'static str, Regex)>> = Lazy::new(|| {
         ("google_api_key", r"\bAIza[0-9A-Za-z_-]{35}\b"),
         // Generic Bearer tokens in HTTP-style strings.
         ("bearer_token", r"Bearer\s+[A-Za-z0-9._\-]{16,}"),
+        // pie hub session / agent credentials can appear as bare values in transport errors.
+        ("pie_hub_token", r"\bhub_(?:agent|hs)_[A-Za-z0-9._\-]{8,}\b"),
     ];
     raw.into_iter()
         .map(|(label, src)| (label, Regex::new(src).expect("regex must compile")))
@@ -148,15 +150,18 @@ mod tests {
 
     #[test]
     fn redacts_known_patterns() {
-        let s = "key=sk-abcdefghij1234567890abcd , aws=AKIAEXAMPLEEXAMPLE1A, gh=gho_abcdefghijklmnopqrstuvwxyz0123456789, slack=xoxb-1234567890-abcdef, header=Authorization: Bearer eyJabc.defghijklmnopqr";
+        let s = "key=sk-abcdefghij1234567890abcd , aws=AKIAEXAMPLEEXAMPLE1A, gh=gho_abcdefghijklmnopqrstuvwxyz0123456789, slack=xoxb-1234567890-abcdef, header=Authorization: Bearer eyJabc.defghijklmnopqr, hub=hub_agent_abcdefghijklmnopqrstuvwxyz, session=hub_hs_abcdefghijklmnopqrstuvwxyz";
         let r = redact(s);
         assert!(!r.contains("sk-abcdefghij"), "openai key leaked: {r}");
         assert!(!r.contains("AKIAEXAMPLE"), "aws key leaked: {r}");
         assert!(!r.contains("gho_"), "github token leaked: {r}");
         assert!(!r.contains("xoxb-"), "slack token leaked: {r}");
         assert!(!r.contains("eyJabc.defghijklmnopqr"), "bearer leaked: {r}");
+        assert!(!r.contains("hub_agent_"), "hub agent token leaked: {r}");
+        assert!(!r.contains("hub_hs_"), "hub session token leaked: {r}");
         assert!(r.contains("[REDACTED:openai_anthropic_key]"));
         assert!(r.contains("[REDACTED:aws_access_key]"));
+        assert!(r.contains("[REDACTED:pie_hub_token]"));
     }
 
     #[test]

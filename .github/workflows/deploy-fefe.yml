@@ -143,9 +143,8 @@ jobs:
         run: |
           # Run schema migrations before deploy so first live e2e can exercise
           # register/login/notification paths against the real D1 database.
-          npx --yes "wrangler@${WRANGLER_VERSION}" d1 migrations apply pie_fefe_hub \
-            --remote \
-            --yes
+          printf 'y\n' | npx --yes "wrangler@${WRANGLER_VERSION}" d1 migrations apply pie_fefe_hub \
+            --remote
 
       - name: deploy worker
         id: deploy

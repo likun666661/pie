@@ -755,10 +755,14 @@ export class AgentMailbox {
       const bytes = this.encoder.encode(toSseEvent(body.notification));
       let delivered = 0;
       for (const writer of [...this.sessions]) {
-        delivered += 1;
-        void writer.write(bytes).catch(() => {
+        try {
+          const wrote = await Promise.race([writer.write(bytes).then(() => true), delay(250).then(() => false)]);
+          if (wrote) {
+            delivered += 1;
+          }
+        } catch {
           this.sessions.delete(writer);
-        });
+        }
       }
       return json({ delivered: delivered > 0 });
     }
@@ -1794,6 +1798,10 @@ function randomSecret(bytes: number): string {
   const raw = new Uint8Array(bytes);
   crypto.getRandomValues(raw);
   return [...raw].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function nowIso(): string {

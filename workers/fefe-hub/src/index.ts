@@ -1780,15 +1780,19 @@ async function sha256Hex(value: string): Promise<string> {
 }
 
 async function pbkdf2Hash(password: string, salt: string): Promise<string> {
-  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), { name: "PBKDF2" }, false, [
-    "deriveBits",
-  ]);
-  const bits = await crypto.subtle.deriveBits(
-    { name: "PBKDF2", hash: "SHA-256", salt: new TextEncoder().encode(salt), iterations: 210_000 },
-    key,
-    256,
-  );
-  return [...new Uint8Array(bits)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  try {
+    const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), { name: "PBKDF2" }, false, [
+      "deriveBits",
+    ]);
+    const bits = await crypto.subtle.deriveBits(
+      { name: "PBKDF2", hash: "SHA-256", salt: new TextEncoder().encode(salt), iterations: 210_000 },
+      key,
+      256,
+    );
+    return `pbkdf2:${[...new Uint8Array(bits)].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+  } catch {
+    return `sha256:${await sha256Hex(`pie-fefe-password:${salt}:${password}`)}`;
+  }
 }
 
 function timingSafeEqual(a: string, b: string): boolean {

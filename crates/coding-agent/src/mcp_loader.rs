@@ -14,20 +14,20 @@ use pie_mcp::{
     HttpMcpAuth, HttpMcpTransport, HttpMcpTransportOptions, McpClient, ReconnectPolicy,
     StdioTransport,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::auth::AuthStore;
 use crate::config::base_dir;
 use crate::tools::mcp_adapter::McpAgentTool;
 use crate::triggers::McpNotificationHook;
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 pub struct McpConfig {
     #[serde(default)]
     pub server: Vec<ServerConfig>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct ServerConfig {
     pub name: String,
     #[serde(default)]
@@ -55,7 +55,7 @@ pub struct ServerConfig {
     pub inject_and_run: bool,
 }
 
-#[derive(Debug, Default, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ServerKind {
     #[default]
@@ -63,13 +63,13 @@ pub enum ServerKind {
     StreamableHttp,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct HttpAuthConfig {
     pub kind: String,
     pub token_keychain_ref: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct ReconnectConfig {
     pub initial_ms: Option<u64>,
     pub max_ms: Option<u64>,

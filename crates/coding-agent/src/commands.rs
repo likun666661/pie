@@ -91,8 +91,15 @@ pub enum CommandOutcome {
     /// Ask the REPL to run compaction through the active-turn path so Ctrl-C/Esc can abort
     /// the model summarization request.
     RunCompaction { custom: Option<String> },
-    /// Prompt for a provider credential without echoing the secret in the terminal input line.
-    LoginSecret { provider: String },
+    /// Prompt for a credential without echoing the secret in the terminal input line.
+    ///
+    /// `provider` is the user-facing label used in prompts. `storage_key` is the optional auth
+    /// store key when the internal lookup key must not be echoed back to the user.
+    LoginSecret {
+        provider: String,
+        storage_key: Option<String>,
+        recovery_command: Option<String>,
+    },
 }
 
 /// Context handed to a command at runtime. Kept narrow so each command's dependencies are
@@ -157,6 +164,7 @@ impl Registry {
         r.register(Arc::new(FindCommand));
         r.register(Arc::new(HistoryCommand));
         r.register(Arc::new(GoalCommand));
+        r.register(Arc::new(HubCommand));
         r.register(Arc::new(TriggersCommand));
         r.register(Arc::new(NewTriggerCommand));
         r.register(Arc::new(CronCommand));
@@ -1020,6 +1028,335 @@ async fn print_goal_status(ctx: &CommandCtx<'_>) {
     }
 }
 
+const HUB_SERVER_NAME: &str = "pie-hub";
+const HUB_TOKEN_REF: &str = "pie-hub:default";
+const HUB_DEFAULT_ENDPOINT: &str = "https://pie.0xfefe.me/mcp";
+
+struct HubCommand;
+
+#[async_trait]
+impl SlashCommand for HubCommand {
+    fn name(&self) -> &'static str {
+        "hub"
+    }
+
+    fn description(&self) -> &'static str {
+        "configure and inspect the pie.0xfefe.me hub client"
+    }
+
+    fn usage(&self) -> &'static str {
+        "[status|connect [--endpoint <url>]|login|logout]"
+    }
+
+    async fn run(&self, argv: &[String], ctx: &CommandCtx<'_>) -> CommandOutcome {
+        match argv.first().map(String::as_str) {
+            None | Some("status") => hub_status(ctx),
+            Some("connect") => hub_connect(&argv[1..]).await,
+            Some("login") => {
+                if argv.len() != 1 {
+                    return CommandOutcome::Error(
+                        "usage: /hub login  (pie will prompt for the hub token without echoing it)"
+                            .into(),
+                    );
+                }
+                cprintln!(
+                    "hub login: paste this agent's hub token at the secret prompt; it will not be echoed"
+                );
+                CommandOutcome::LoginSecret {
+                    provider: HUB_SERVER_NAME.into(),
+                    storage_key: Some(HUB_TOKEN_REF.into()),
+                    recovery_command: Some("/hub login".into()),
+                }
+            }
+            Some("logout") => hub_logout(),
+            Some(
+                "register" | "profile" | "visibility" | "list" | "send" | "inbox" | "trust"
+                | "block" | "unblock" | "rotate",
+            ) => CommandOutcome::Error(format!(
+                "/hub {} is not wired in this client slice yet; use /hub connect, /hub login, and /hub status first",
+                argv[0]
+            )),
+            Some(_) => CommandOutcome::Error(
+                "usage: /hub [status|connect [--endpoint <url>]|login|logout]".into(),
+            ),
+        }
+    }
+}
+
+fn hub_status(ctx: &CommandCtx<'_>) -> CommandOutcome {
+    let config = effective_hub_config(ctx.cwd);
+    cprintln!("Hub status:");
+    match &config {
+        Some(entry) => {
+            cprintln!("  config        configured ({})", entry.source);
+            cprintln!("  server        {}", HUB_SERVER_NAME);
+            cprintln!(
+                "  endpoint      {}",
+                entry
+                    .endpoint_host
+                    .as_deref()
+                    .unwrap_or("<invalid endpoint host>")
+            );
+            cprintln!(
+                "  auth          {}",
+                if entry.auth_configured {
+                    "configured"
+                } else {
+                    "missing"
+                }
+            );
+        }
+        None => {
+            cprintln!("  config        missing");
+            cprintln!("  recovery      run /hub connect, then /hub login");
+        }
+    }
+
+    let credential = hub_credential_state();
+    cprintln!("  credential    {credential}");
+
+    let hook = hub_hook_status(ctx);
+    cprintln!("  connection    {}", hook.state);
+    if let Some(last_event) = hook.last_event {
+        cprintln!("  last event    {last_event}");
+    }
+    if let Some(err) = hook.last_error {
+        cprintln!("  last error    {}", preview_text(&err, 160));
+    }
+    if let Some(recovery) = hub_recovery_hint(config.as_ref(), &credential, &hook.state) {
+        cprintln!("  recovery      {recovery}");
+    }
+    CommandOutcome::Handled
+}
+
+async fn hub_connect(argv: &[String]) -> CommandOutcome {
+    let parsed = match parse_hub_connect_args(argv) {
+        Ok(parsed) => parsed,
+        Err(e) => return CommandOutcome::Error(e),
+    };
+    let endpoint_host = endpoint_host(&parsed.endpoint).unwrap_or_else(|| "<invalid>".into());
+    let path = crate::config::base_dir().join("mcp.toml");
+    let mut config = match read_mcp_config(&path) {
+        Ok(config) => config,
+        Err(e) => return CommandOutcome::Error(format!("read mcp config: {e}")),
+    };
+    upsert_hub_server(&mut config, parsed.endpoint);
+    let text = match toml::to_string_pretty(&config) {
+        Ok(text) => text,
+        Err(e) => return CommandOutcome::Error(format!("serialize mcp config: {e}")),
+    };
+    if let Some(parent) = path.parent()
+        && let Err(e) = tokio::fs::create_dir_all(parent).await
+    {
+        return CommandOutcome::Error(format!("create mcp config dir: {e}"));
+    }
+    if let Err(e) = tokio::fs::write(&path, text).await {
+        return CommandOutcome::Error(format!("write mcp config: {e}"));
+    }
+    cprintln!("hub configured: {} -> {}", HUB_SERVER_NAME, endpoint_host);
+    cprintln!("auth configured: yes");
+    cprintln!("next: run /hub login, then restart pie to connect the MCP transport");
+    CommandOutcome::Handled
+}
+
+fn hub_logout() -> CommandOutcome {
+    let mut store = match crate::auth::AuthStore::load() {
+        Ok(store) => store,
+        Err(e) => return CommandOutcome::Error(format!("load auth store: {e}")),
+    };
+    let removed = store.remove(HUB_TOKEN_REF).is_some();
+    if let Err(e) = store.save() {
+        return CommandOutcome::Error(format!("save auth store: {e}"));
+    }
+    if removed {
+        cprintln!("hub credential removed");
+    } else {
+        cprintln!("no hub credential was stored");
+    }
+    cprintln!("run /hub login to store a new hub token");
+    CommandOutcome::Handled
+}
+
+struct HubConnectArgs {
+    endpoint: String,
+}
+
+fn parse_hub_connect_args(argv: &[String]) -> Result<HubConnectArgs, String> {
+    let mut endpoint = HUB_DEFAULT_ENDPOINT.to_string();
+    let mut i = 0usize;
+    while i < argv.len() {
+        match argv[i].as_str() {
+            "--endpoint" => {
+                i += 1;
+                let Some(value) = argv.get(i) else {
+                    return Err("usage: /hub connect [--endpoint <https-url>]".into());
+                };
+                endpoint = value.clone();
+            }
+            _ => return Err("unknown option for /hub connect".into()),
+        }
+        i += 1;
+    }
+    validate_hub_endpoint(&endpoint)?;
+    Ok(HubConnectArgs { endpoint })
+}
+
+fn validate_hub_endpoint(endpoint: &str) -> Result<(), String> {
+    let url = reqwest::Url::parse(endpoint)
+        .map_err(|_| "hub endpoint must be a valid URL".to_string())?;
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("hub endpoint must not include credentials".into());
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err("hub endpoint must not include query or fragment values".into());
+    }
+    if url.scheme() != "https" && url.host_str() != Some("127.0.0.1") {
+        return Err("hub endpoint must be https, except 127.0.0.1 test fixtures".into());
+    }
+    Ok(())
+}
+
+fn upsert_hub_server(config: &mut crate::mcp_loader::McpConfig, endpoint: String) {
+    let server = crate::mcp_loader::ServerConfig {
+        name: HUB_SERVER_NAME.into(),
+        kind: crate::mcp_loader::ServerKind::StreamableHttp,
+        command: None,
+        args: Vec::new(),
+        endpoint: Some(endpoint),
+        auth: Some(crate::mcp_loader::HttpAuthConfig {
+            kind: "bearer".into(),
+            token_keychain_ref: Some(HUB_TOKEN_REF.into()),
+        }),
+        request_timeout_ms: None,
+        sse_idle_timeout_ms: None,
+        body_cap_bytes: None,
+        reconnect: None,
+        inject_summary: false,
+        inject_and_run: false,
+    };
+    if let Some(existing) = config
+        .server
+        .iter_mut()
+        .find(|entry| entry.name == HUB_SERVER_NAME)
+    {
+        *existing = server;
+    } else {
+        config.server.push(server);
+    }
+}
+
+fn read_mcp_config(path: &std::path::Path) -> Result<crate::mcp_loader::McpConfig, String> {
+    if !path.exists() {
+        return Ok(crate::mcp_loader::McpConfig::default());
+    }
+    let text =
+        std::fs::read_to_string(path).map_err(|_| "unable to read mcp config".to_string())?;
+    if text.trim().is_empty() {
+        return Ok(crate::mcp_loader::McpConfig::default());
+    }
+    toml::from_str(&text).map_err(|_| "unable to parse mcp config".to_string())
+}
+
+#[derive(Debug)]
+struct EffectiveHubConfig {
+    source: &'static str,
+    endpoint_host: Option<String>,
+    auth_configured: bool,
+}
+
+fn effective_hub_config(cwd: &std::path::Path) -> Option<EffectiveHubConfig> {
+    let user_path = crate::config::base_dir().join("mcp.toml");
+    let project_path = cwd.join(".pie").join("mcp.toml");
+    let mut found = hub_config_from_path(&user_path, "user");
+    if let Some(project) = hub_config_from_path(&project_path, "project") {
+        found = Some(project);
+    }
+    found
+}
+
+fn hub_config_from_path(
+    path: &std::path::Path,
+    source: &'static str,
+) -> Option<EffectiveHubConfig> {
+    let config = read_mcp_config(path).ok()?;
+    let entry = config
+        .server
+        .into_iter()
+        .find(|s| s.name == HUB_SERVER_NAME)?;
+    Some(EffectiveHubConfig {
+        source,
+        endpoint_host: entry.endpoint.as_deref().and_then(endpoint_host),
+        auth_configured: entry.auth.as_ref().is_some_and(|auth| {
+            auth.kind == "bearer" && auth.token_keychain_ref.as_deref() == Some(HUB_TOKEN_REF)
+        }),
+    })
+}
+
+fn endpoint_host(endpoint: &str) -> Option<String> {
+    reqwest::Url::parse(endpoint)
+        .ok()
+        .and_then(|url| url.host_str().map(ToString::to_string))
+}
+
+fn hub_credential_state() -> String {
+    match crate::auth::AuthStore::load() {
+        Ok(store) if store.get(HUB_TOKEN_REF).is_some() => "stored".into(),
+        Ok(_) => "missing".into(),
+        Err(_) => "unreadable".into(),
+    }
+}
+
+struct HubHookView {
+    state: String,
+    last_event: Option<String>,
+    last_error: Option<String>,
+}
+
+fn hub_hook_status(ctx: &CommandCtx<'_>) -> HubHookView {
+    let snapshot = ctx.harness.notification_status_snapshot();
+    let hook = snapshot.hooks.into_iter().find(|hook| {
+        hook.subscription_labels
+            .iter()
+            .any(|label| label == "mcp:pie-hub")
+    });
+    let Some(hook) = hook else {
+        return HubHookView {
+            state: "not connected".into(),
+            last_event: None,
+            last_error: None,
+        };
+    };
+    HubHookView {
+        state: render_hook_state(&hook.state),
+        last_event: hook.last_event_at.map(|d| d.to_rfc3339()),
+        last_error: hook.last_error.map(|err| redact_hub_status_text(&err)),
+    }
+}
+
+fn hub_recovery_hint(
+    config: Option<&EffectiveHubConfig>,
+    credential: &str,
+    connection_state: &str,
+) -> Option<&'static str> {
+    if config.is_none() {
+        return Some("run /hub connect");
+    }
+    if credential == "missing" {
+        return Some("run /hub login");
+    }
+    if credential == "unreadable" {
+        return Some("fix ~/.pie/auth.json permissions or run /hub logout, then /hub login");
+    }
+    if connection_state == "not connected" {
+        return Some("restart pie to load the hub MCP transport");
+    }
+    None
+}
+
+pub(crate) fn redact_hub_status_text(text: &str) -> String {
+    crate::bug_report::redact(text).replace('\n', " ")
+}
+
 #[allow(dead_code)]
 pub fn print_help(registry: &Registry, topic: Option<&str>) {
     emit_multiline(&help_text_with_skills(registry, topic, &[]));
@@ -1695,6 +2032,8 @@ impl SlashCommand for LoginCommand {
         }
         CommandOutcome::LoginSecret {
             provider: argv[0].clone(),
+            storage_key: None,
+            recovery_command: None,
         }
     }
 }

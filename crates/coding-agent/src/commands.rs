@@ -1078,7 +1078,7 @@ impl SlashCommand for HubCommand {
     async fn run(&self, argv: &[String], ctx: &CommandCtx<'_>) -> CommandOutcome {
         match argv.first().map(String::as_str) {
             None | Some("status") => hub_status(ctx),
-            Some("join") => hub_join(argv).await,
+            Some("join") => hub_join(argv, ctx).await,
             Some("send") => hub_send(&argv[1..]).await,
             Some("inbox") => hub_inbox(&argv[1..]).await,
             Some("connect") => hub_connect(&argv[1..]).await,
@@ -1113,15 +1113,24 @@ impl SlashCommand for HubCommand {
     }
 }
 
-async fn hub_join(argv: &[String]) -> CommandOutcome {
+async fn hub_join(argv: &[String], ctx: &CommandCtx<'_>) -> CommandOutcome {
     if argv.len() != 1 {
         return CommandOutcome::Error("usage: /hub join".into());
     }
     cprintln!("Opening browser to join pie.0xfefe.me...");
     match crate::hub_join::join_default_hub().await {
         Ok(joined) => {
-            cprintln!("Joined hub as @{}@{}", joined.handle, joined.namespace);
-            cprintln!("restart pie, then run /hub status");
+            cprintln!(
+                "Joined hub as {}",
+                safe_joined_mention(&joined.handle, &joined.namespace)
+            );
+            if let Err(e) = ensure_hub_hook_connected(ctx).await {
+                return CommandOutcome::Error(format!(
+                    "hub join saved credential, but live connection failed: {}; run /hub status",
+                    redact_hub_status_text(&e.to_string())
+                ));
+            }
+            cprintln!("hub is connected; run /hub status or /hub send");
             CommandOutcome::Handled
         }
         Err(e) => CommandOutcome::Error(format!(
@@ -1129,6 +1138,29 @@ async fn hub_join(argv: &[String]) -> CommandOutcome {
             redact_hub_status_text(&e.to_string())
         )),
     }
+}
+
+async fn ensure_hub_hook_connected(ctx: &CommandCtx<'_>) -> anyhow::Result<()> {
+    if has_live_hub_hook(ctx) {
+        return Ok(());
+    }
+    let hook = crate::mcp_loader::connect_built_in_hub_notification_hook().await?;
+    ctx.harness.register_notification_hook(hook);
+    for _ in 0..20 {
+        if has_live_hub_hook(ctx) {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    anyhow::bail!("hub transport did not report connected");
+}
+
+fn has_live_hub_hook(ctx: &CommandCtx<'_>) -> bool {
+    ctx.harness
+        .notification_status_snapshot()
+        .hooks
+        .into_iter()
+        .any(|hook| is_hub_hook(&hook) && is_live_hook_state(&hook.state))
 }
 
 fn hub_status(ctx: &CommandCtx<'_>) -> CommandOutcome {
@@ -1395,6 +1427,15 @@ fn preview_agent_label(agent: &crate::hub_client::HubAgentSummary) -> String {
     )
 }
 
+fn safe_joined_mention(handle: &str, namespace: &str) -> String {
+    let raw = format!("@{handle}@{namespace}");
+    let redacted = redact_hub_status_text(&raw);
+    if redacted != raw {
+        return "@unknown@hub".into();
+    }
+    crate::hub_client::parse_mention(&redacted).unwrap_or_else(|| "@unknown@hub".into())
+}
+
 fn preview_mention(sender: &str) -> String {
     let redacted = redact_hub_status_text(sender);
     if let Some(sender) = crate::hub_client::parse_mention(&redacted) {
@@ -1628,11 +1669,16 @@ struct HubHookView {
 
 fn hub_hook_status(ctx: &CommandCtx<'_>) -> HubHookView {
     let snapshot = ctx.harness.notification_status_snapshot();
-    let hook = snapshot.hooks.into_iter().find(|hook| {
-        hook.subscription_labels
-            .iter()
-            .any(|label| label == "mcp:pie-hub")
-    });
+    let mut hooks = snapshot.hooks.into_iter().filter(is_hub_hook);
+    let hook = hooks
+        .find(|hook| is_live_hook_state(&hook.state))
+        .or_else(|| {
+            ctx.harness
+                .notification_status_snapshot()
+                .hooks
+                .into_iter()
+                .find(is_hub_hook)
+        });
     let Some(hook) = hook else {
         return HubHookView {
             state: "not connected".into(),
@@ -1645,6 +1691,16 @@ fn hub_hook_status(ctx: &CommandCtx<'_>) -> HubHookView {
         last_event: hook.last_event_at.map(|d| d.to_rfc3339()),
         last_error: hook.last_error.map(|err| redact_hub_status_text(&err)),
     }
+}
+
+fn is_hub_hook(hook: &NotificationHookStatus) -> bool {
+    hook.subscription_labels
+        .iter()
+        .any(|label| label == "mcp:pie-hub")
+}
+
+fn is_live_hook_state(state: &HookState) -> bool {
+    matches!(state, HookState::Connected | HookState::Reconnecting)
 }
 
 fn hub_recovery_hint(credential: &str, connection_state: &str) -> Option<&'static str> {

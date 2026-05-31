@@ -11,7 +11,7 @@ use axum::response::IntoResponse;
 use axum::response::Response;
 use axum::routing::post;
 use pie_agent_core::{
-    AgentHarness, AgentHarnessOptions, MemorySessionStorage, Session, SessionStorage,
+    AgentHarness, AgentHarnessOptions, HookState, MemorySessionStorage, Session, SessionStorage,
 };
 use serde_json::json;
 
@@ -113,10 +113,22 @@ fn faux_model() -> pie_ai::Model {
     }
 }
 
-#[derive(Default)]
 struct FauxHubJoinState {
     start: Option<hub_auth::HubAuthStartRequest>,
     exchange: Option<hub_auth::HubAuthExchangeCodeRequest>,
+    handle: String,
+    namespace: String,
+}
+
+impl Default for FauxHubJoinState {
+    fn default() -> Self {
+        Self {
+            start: None,
+            exchange: None,
+            handle: "alice".into(),
+            namespace: "dongxu".into(),
+        }
+    }
 }
 
 struct FauxHubJoinServer {
@@ -175,11 +187,15 @@ async fn faux_hub_join_auth_exchange(
     State(state): State<Arc<tokio::sync::Mutex<FauxHubJoinState>>>,
     axum::Json(request): axum::Json<hub_auth::HubAuthExchangeCodeRequest>,
 ) -> axum::Json<hub_auth::HubAuthExchangeCodeResponse> {
-    state.lock().await.exchange = Some(request);
+    let mut state = state.lock().await;
+    state.exchange = Some(request);
+    let handle = state.handle.clone();
+    let namespace = state.namespace.clone();
+    drop(state);
     axum::Json(hub_auth::HubAuthExchangeCodeResponse {
         agent_id: "018fe23a-1111-4a22-8b33-123456789abc".into(),
-        handle: "alice".into(),
-        namespace: "dongxu".into(),
+        handle,
+        namespace,
         hub_token: "hub_agent_command_join_secret".into(),
         expires_at: None,
         profile: hub_auth::HubAuthProfile {
@@ -329,6 +345,7 @@ async fn faux_hub_mcp_post(
             };
             json!({"content": [{"type": "text", "text": output.to_string()}]})
         }
+        "tools/list" => json!({ "tools": [] }),
         other => panic!("unexpected method {other}"),
     };
     axum::Json(json!({"jsonrpc": "2.0", "id": id, "result": result})).into_response()
@@ -339,7 +356,7 @@ fn check_mcp_auth(headers: &HeaderMap) -> Option<Response> {
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if auth != "Bearer hub_agent_command_secret" {
+    if auth != "Bearer hub_agent_command_secret" && auth != "Bearer hub_agent_command_join_secret" {
         return Some(axum::http::StatusCode::UNAUTHORIZED.into_response());
     }
     None
@@ -354,6 +371,9 @@ async fn hub_join_command_success_outputs_safe_user_text_and_stores_credential()
     auth::AuthStore::default().save().unwrap();
 
     let server = FauxHubJoinServer::start().await;
+    let mcp_server = FauxHubMcpServer::start().await;
+    let _mcp_endpoint_guard =
+        mcp_loader::install_test_built_in_hub_endpoint(mcp_server.endpoint.clone());
     let login_url_seen = Arc::new(Mutex::new(None::<String>));
     let (callback_tx, callback_rx) = tokio::sync::oneshot::channel::<String>();
     let callback_tx = parking_lot::Mutex::new(Some(callback_tx));
@@ -389,7 +409,10 @@ async fn hub_join_command_success_outputs_safe_user_text_and_stores_credential()
     };
 
     let outcome = commands::dispatch("/hub join", &registry, &ctx).await;
-    assert!(matches!(outcome, commands::CommandOutcome::Handled));
+    assert!(
+        matches!(outcome, commands::CommandOutcome::Handled),
+        "{outcome:?}"
+    );
     let callback_text = callback_rx.await.unwrap();
     assert!(
         callback_text.contains("Hub login complete"),
@@ -431,7 +454,8 @@ async fn hub_join_command_success_outputs_safe_user_text_and_stores_credential()
         "{text}"
     );
     assert!(text.contains("Joined hub as @alice@dongxu"), "{text}");
-    assert!(text.contains("restart pie, then run /hub status"), "{text}");
+    assert!(text.contains("hub is connected"), "{text}");
+    assert!(!text.contains("restart pie"), "{text}");
     let login_url = login_url_seen
         .lock()
         .unwrap()
@@ -456,6 +480,74 @@ async fn hub_join_command_success_outputs_safe_user_text_and_stores_credential()
     assert!(!text.contains("MCP"), "{text}");
     assert!(!text.contains("mcp"), "{text}");
     assert!(!text.contains("config"), "{text}");
+
+    let snapshot = harness.notification_status_snapshot();
+    assert!(
+        snapshot.hooks.iter().any(|hook| {
+            hook.subscription_labels
+                .iter()
+                .any(|label| label == "mcp:pie-hub")
+                && matches!(hook.state, HookState::Connected | HookState::Reconnecting)
+        }),
+        "{:?}",
+        snapshot.hooks
+    );
+}
+
+#[tokio::test]
+async fn hub_join_command_redacts_secret_like_join_identity() {
+    let _auth_guard = auth::ENV_LOCK.lock().unwrap();
+    let _pie_guard = PIE_DIR_ENV_LOCK.lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let _pie_dir = EnvGuard::set("PIE_DIR", temp.path());
+    auth::AuthStore::default().save().unwrap();
+
+    let server = FauxHubJoinServer::start().await;
+    {
+        let mut state = server.state.lock().await;
+        state.handle = "hub_agent_join_identity_secret".into();
+        state.namespace = "dongxu".into();
+    }
+    let mcp_server = FauxHubMcpServer::start().await;
+    let _mcp_endpoint_guard =
+        mcp_loader::install_test_built_in_hub_endpoint(mcp_server.endpoint.clone());
+    let state_for_opener = server.state.clone();
+    let _join_guard = hub_join::install_test_join_runtime(server.origin.clone(), move |url| {
+        let url = url.to_string();
+        let state = state_for_opener.clone();
+        tokio::spawn(async move {
+            let _ = drive_faux_hub_join_browser(&url, state).await;
+        });
+        Ok(())
+    });
+    let capture = OutputCapture::install();
+
+    let storage = Arc::new(MemorySessionStorage::new());
+    let session = Session::new(storage as Arc<dyn SessionStorage>);
+    let opts = AgentHarnessOptions::new(faux_model(), session);
+    let harness = Arc::new(AgentHarness::new(opts));
+    let registry = commands::Registry::with_builtins();
+    let cwd = std::env::current_dir().unwrap();
+    let ctx = commands::CommandCtx {
+        harness: &harness,
+        session_id: "test-hub-join-command-redacts-identity",
+        log_path: None::<&PathBuf>,
+        tool_count: 0,
+        cwd: &cwd,
+    };
+
+    let outcome = commands::dispatch("/hub join", &registry, &ctx).await;
+    assert!(
+        matches!(outcome, commands::CommandOutcome::Handled),
+        "{outcome:?}"
+    );
+
+    let text = capture.text();
+    assert!(text.contains("Joined hub as @unknown@hub"), "{text}");
+    assert!(!text.contains("hub_agent_join_identity_secret"), "{text}");
+    assert!(!text.contains("hub_agent_"), "{text}");
+    assert!(!text.contains("pie-hub:default"), "{text}");
+    assert!(!text.contains("restart pie"), "{text}");
 }
 
 #[tokio::test]

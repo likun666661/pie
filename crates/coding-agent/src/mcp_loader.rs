@@ -149,7 +149,9 @@ fn built_in_hub_server() -> ServerConfig {
         kind: ServerKind::StreamableHttp,
         command: None,
         args: Vec::new(),
-        endpoint: Some(BUILT_IN_HUB_ENDPOINT.into()),
+        endpoint: Some(
+            test_built_in_hub_endpoint().unwrap_or_else(|| BUILT_IN_HUB_ENDPOINT.into()),
+        ),
         auth: Some(HttpAuthConfig {
             kind: "bearer".into(),
             token_keychain_ref: Some(BUILT_IN_HUB_TOKEN_REF.into()),
@@ -161,6 +163,11 @@ fn built_in_hub_server() -> ServerConfig {
         inject_summary: false,
         inject_and_run: false,
     }
+}
+
+pub async fn connect_built_in_hub_notification_hook() -> Result<Arc<McpNotificationHook>> {
+    let (_tools, hook) = connect_one(&built_in_hub_server()).await?;
+    Ok(hook)
 }
 
 fn add_built_in_hub_if_ready(configs: &mut Vec<ServerConfig>) {
@@ -176,6 +183,41 @@ fn add_built_in_hub_if_ready(configs: &mut Vec<ServerConfig>) {
         .is_some()
     {
         configs.push(built_in_hub_server());
+    }
+}
+
+#[cfg(test)]
+static TEST_BUILT_IN_HUB_ENDPOINT: once_cell::sync::Lazy<parking_lot::Mutex<Option<String>>> =
+    once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(None));
+
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) struct BuiltInHubEndpointTestGuard;
+
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) fn install_test_built_in_hub_endpoint(
+    endpoint: impl Into<String>,
+) -> BuiltInHubEndpointTestGuard {
+    *TEST_BUILT_IN_HUB_ENDPOINT.lock() = Some(endpoint.into());
+    BuiltInHubEndpointTestGuard
+}
+
+#[cfg(test)]
+impl Drop for BuiltInHubEndpointTestGuard {
+    fn drop(&mut self) {
+        *TEST_BUILT_IN_HUB_ENDPOINT.lock() = None;
+    }
+}
+
+fn test_built_in_hub_endpoint() -> Option<String> {
+    #[cfg(test)]
+    {
+        TEST_BUILT_IN_HUB_ENDPOINT.lock().clone()
+    }
+    #[cfg(not(test))]
+    {
+        None
     }
 }
 
@@ -345,7 +387,7 @@ async fn connect_streamable_http(s: &ServerConfig) -> Result<Arc<McpClient>> {
 
 fn validate_official_hub_scope(s: &ServerConfig) -> Result<()> {
     let uses_official_name = s.name == BUILT_IN_HUB_SERVER_NAME;
-    let uses_official_endpoint = s.endpoint.as_deref() == Some(BUILT_IN_HUB_ENDPOINT);
+    let uses_official_endpoint = s.endpoint.as_deref().is_some_and(is_official_hub_endpoint);
     let uses_official_credential = s.auth.as_ref().is_some_and(|auth| {
         auth.kind == "bearer" && auth.token_keychain_ref.as_deref() == Some(BUILT_IN_HUB_TOKEN_REF)
     });
@@ -358,6 +400,13 @@ fn validate_official_hub_scope(s: &ServerConfig) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn is_official_hub_endpoint(endpoint: &str) -> bool {
+    endpoint == BUILT_IN_HUB_ENDPOINT
+        || test_built_in_hub_endpoint()
+            .as_deref()
+            .is_some_and(|test_endpoint| endpoint == test_endpoint)
 }
 
 fn resolve_http_auth(auth: Option<&HttpAuthConfig>) -> Result<HttpMcpAuth> {

@@ -121,7 +121,7 @@ async fn hub_join_browser_loopback_stores_token_without_rendering_auth_secrets()
     assert!(!exchange.code_verifier.is_empty());
 
     let visible = format!(
-        "Joined hub as @{}@{}; restart pie, then run /hub status",
+        "Joined hub as @{}@{}; hub is connected; run /hub status or /hub send",
         joined.handle, joined.namespace
     );
     let secrets = hub_auth::HubAuthSecretFragments {
@@ -133,6 +133,7 @@ async fn hub_join_browser_loopback_stores_token_without_rendering_auth_secrets()
         login_url: Some(&login_url),
     };
     secrets.assert_absent_from("join visible output", &visible);
+    assert!(!visible.contains("restart pie"), "{visible}");
 }
 
 struct FauxAuthServer {

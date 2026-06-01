@@ -1524,10 +1524,64 @@ fn parse_hub_inbox_args(argv: &[String]) -> Result<usize, String> {
 }
 
 fn hub_recovery_error(prefix: &str, error: &anyhow::Error) -> String {
+    if let Some(hub_error) = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<crate::hub_client::HubToolError>())
+    {
+        return format!("{prefix}: {}", hub_tool_recovery_text(hub_error));
+    }
+    if let Some(mcp_error) = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<pie_mcp::McpError>())
+    {
+        return format!("{prefix}: {}", mcp_recovery_text(mcp_error));
+    }
     format!(
         "{prefix}: {}; run /hub status or /hub join",
         preview_text(&redact_hub_status_text(&error.to_string()), 160)
     )
+}
+
+fn hub_tool_recovery_text(error: &crate::hub_client::HubToolError) -> String {
+    match error.code {
+        -32000 | -32005 | -32009 | -32010 => {
+            "hub auth is not usable; run /hub join and retry".into()
+        }
+        -32001 => "target cannot receive this hub message; inbox policy denied delivery".into(),
+        -32003 => "target not found; check name@namespace or ask them to run /hub join".into(),
+        -32004 => "message is too large for hub delivery".into(),
+        -32006 => "target requires first-contact approval before delivery".into(),
+        -32007 => "hub request was invalid; use /hub send name@namespace \"message\"".into(),
+        _ => format!(
+            "hub returned {}: {}",
+            error.code,
+            preview_text(&redact_hub_status_text(&error.message), 120)
+        ),
+    }
+}
+
+fn mcp_recovery_text(error: &pie_mcp::McpError) -> String {
+    match error {
+        pie_mcp::McpError::Transport(_) | pie_mcp::McpError::Timeout { .. } => {
+            "hub transport unavailable; check /hub status and retry".into()
+        }
+        pie_mcp::McpError::Cancelled => "hub request was cancelled; retry when ready".into(),
+        pie_mcp::McpError::NotInitialized => {
+            "hub transport is not initialized; run /hub status".into()
+        }
+        pie_mcp::McpError::ServerError { code, message } => {
+            let hub_error = crate::hub_client::HubToolError {
+                tool: "unknown".into(),
+                code: *code,
+                message: message.clone(),
+            };
+            hub_tool_recovery_text(&hub_error)
+        }
+        pie_mcp::McpError::Protocol(_) | pie_mcp::McpError::Other(_) => format!(
+            "hub response was not usable: {}",
+            preview_text(&redact_hub_status_text(&error.to_string()), 120)
+        ),
+    }
 }
 
 fn render_hub_delivery(receipt: &crate::hub_client::HubSendReceipt) -> &'static str {

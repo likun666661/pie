@@ -7,10 +7,14 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use std::error::Error;
+use std::fmt;
+
 use anyhow::{Context, Result, bail};
 use pie_mcp::protocol::ToolContent;
 use pie_mcp::{
-    HttpMcpTransport, HttpMcpTransportOptions, McpClient, McpToolCallResult, ReconnectPolicy,
+    HttpMcpTransport, HttpMcpTransportOptions, McpClient, McpError, McpToolCallResult,
+    ReconnectPolicy,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -26,6 +30,25 @@ const LOOKUP_LIMIT: usize = 50;
 pub struct HubClient {
     client: Arc<McpClient>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HubToolError {
+    pub tool: String,
+    pub code: i64,
+    pub message: String,
+}
+
+impl fmt::Display for HubToolError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "hub tool `{}` returned error {}: {}",
+            self.tool, self.code, self.message
+        )
+    }
+}
+
+impl Error for HubToolError {}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct HubAgentSummary {
@@ -175,11 +198,18 @@ impl HubClient {
         tool: &str,
         args: serde_json::Value,
     ) -> Result<T> {
-        let result = self
-            .client
-            .tools_call(tool, Some(args), None)
-            .await
-            .with_context(|| format!("hub tool `{tool}` failed"))?;
+        let result = match self.client.tools_call(tool, Some(args), None).await {
+            Ok(result) => result,
+            Err(McpError::ServerError { code, message }) => {
+                return Err(HubToolError {
+                    tool: tool.into(),
+                    code,
+                    message,
+                }
+                .into());
+            }
+            Err(err) => return Err(err).with_context(|| format!("hub tool `{tool}` failed")),
+        };
         parse_tool_json(tool, result)
     }
 }

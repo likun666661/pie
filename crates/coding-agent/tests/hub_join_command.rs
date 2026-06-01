@@ -312,6 +312,40 @@ async fn faux_hub_mcp_post(
             let params = payload["params"].clone();
             state.lock().await.calls.push(params.clone());
             let tool = params["name"].as_str().unwrap();
+            let args = params
+                .get("arguments")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            if tool == "get_agent_profile" && args["agent_handle"] == "@missing@dongxu" {
+                return axum::Json(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": {
+                        "code": -32003,
+                        "message": "No agent with that id is reachable. Check discover_public_agents.",
+                        "data": {
+                            "name": "not_found",
+                            "secret": "hub_agent_missing_secret"
+                        }
+                    }
+                }))
+                .into_response();
+            }
+            if tool == "send_notification" && args["summary"] == "closed inbox" {
+                return axum::Json(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": {
+                        "code": -32001,
+                        "message": "Operation not permitted by the target's inbox policy.",
+                        "data": {
+                            "name": "permission_denied",
+                            "target_agent_id": "018fe23a-2222-4a22-8b33-123456789abc"
+                        }
+                    }
+                }))
+                .into_response();
+            }
             let output = match tool {
                 "get_agent_profile" => json!({
                     "agent": {
@@ -757,6 +791,60 @@ async fn hub_send_command_resolves_mentions_and_outputs_bounded_status() {
         Some("Local")
     );
     assert!(send["arguments"].get("payload").is_none());
+}
+
+#[tokio::test]
+async fn hub_send_errors_are_actionable_and_redacted() {
+    let _auth_guard = auth::ENV_LOCK.lock().unwrap();
+    let _pie_guard = PIE_DIR_ENV_LOCK.lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let _pie_dir = EnvGuard::set("PIE_DIR", temp.path());
+    let mut store = auth::AuthStore::default();
+    store.set(
+        hub_auth::HUB_TOKEN_REF,
+        auth::ProviderCredential::ApiKey {
+            value: "hub_agent_command_secret".into(),
+        },
+    );
+    store.save().unwrap();
+
+    let server = FauxHubMcpServer::start().await;
+    let _endpoint_guard = hub_client::install_test_endpoint(server.endpoint.clone());
+
+    let storage = Arc::new(MemorySessionStorage::new());
+    let session = Session::new(storage as Arc<dyn SessionStorage>);
+    let opts = AgentHarnessOptions::new(faux_model(), session);
+    let harness = Arc::new(AgentHarness::new(opts));
+    let registry = commands::Registry::with_builtins();
+    let cwd = std::env::current_dir().unwrap();
+    let ctx = commands::CommandCtx {
+        harness: &harness,
+        session_id: "test-hub-send-error-command",
+        log_path: None::<&PathBuf>,
+        tool_count: 0,
+        cwd: &cwd,
+    };
+
+    let missing = commands::dispatch("/hub send missing@dongxu \"hello\"", &registry, &ctx).await;
+    let missing = match missing {
+        commands::CommandOutcome::Error(message) => message,
+        _ => panic!("expected hub send error"),
+    };
+    assert!(missing.contains("target not found"), "{missing}");
+    assert!(missing.contains("name@namespace"), "{missing}");
+    assert!(!missing.contains("send_notification failed"), "{missing}");
+    assert!(!missing.contains("hub_agent_missing_secret"), "{missing}");
+
+    let denied = commands::dispatch("/hub send bob@dongxu \"closed inbox\"", &registry, &ctx).await;
+    let denied = match denied {
+        commands::CommandOutcome::Error(message) => message,
+        _ => panic!("expected hub send error"),
+    };
+    assert!(denied.contains("inbox policy denied"), "{denied}");
+    assert!(!denied.contains("send_notification failed"), "{denied}");
+    assert!(!denied.contains("018fe23a"), "{denied}");
+    assert!(!denied.contains("target_agent_id"), "{denied}");
+    assert!(!denied.contains("hub_agent_command_secret"), "{denied}");
 }
 
 #[tokio::test]

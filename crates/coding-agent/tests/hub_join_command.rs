@@ -756,7 +756,11 @@ async fn hub_send_command_resolves_mentions_and_outputs_bounded_status() {
     assert!(text.contains("hello from alice"), "{text}");
     assert!(text.contains("compat hello"), "{text}");
     assert!(text.contains("queued for first-contact review"), "{text}");
-    assert!(text.contains("payload       Local (not sent)"), "{text}");
+    assert!(
+        text.contains("privacy       private payload stayed local"),
+        "{text}"
+    );
+    assert!(!text.contains("not sent"), "{text}");
     assert!(!text.contains("hub_agent_command_secret"), "{text}");
     assert!(!text.contains("hub_agent_profile_secret"), "{text}");
     assert!(!text.contains("hub_agent_status_secret"), "{text}");

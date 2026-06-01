@@ -332,8 +332,17 @@ fn browser_unavailable_reason() -> Option<String> {
     if std::env::var_os("PIE_HUB_JOIN_NO_BROWSER").is_some() {
         return Some("browser auto-open disabled for this session".into());
     }
-    if std::env::var_os("SSH_CONNECTION").is_some() || std::env::var_os("SSH_TTY").is_some() {
+    if std::env::var_os("SSH_CONNECTION").is_some()
+        || std::env::var_os("SSH_TTY").is_some()
+        || std::env::var_os("SSH_CLIENT").is_some()
+    {
         return Some("SSH session detected; browser auto-open may be unavailable".into());
+    }
+    #[cfg(all(unix, not(test)))]
+    if process_tree_contains_sshd() {
+        return Some(
+            "SSH session detected from process tree; browser auto-open may be unavailable".into(),
+        );
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
@@ -345,11 +354,17 @@ fn browser_unavailable_reason() -> Option<String> {
 }
 
 async fn open_browser(url: &str) -> Result<()> {
-    if let Some(opener) = test_browser_opener() {
-        return opener(url);
+    #[cfg(test)]
+    if std::env::var_os("PIE_HUB_JOIN_TEST_RESPECT_HEADLESS").is_none() {
+        if let Some(opener) = test_browser_opener() {
+            return opener(url);
+        }
     }
     if let Some(reason) = browser_unavailable_reason() {
         anyhow::bail!("{reason}");
+    }
+    if let Some(opener) = test_browser_opener() {
+        return opener(url);
     }
     let url = url.to_string();
     let status = tokio::time::timeout(BROWSER_OPEN_TIMEOUT, async move {
@@ -364,6 +379,39 @@ async fn open_browser(url: &str) -> Result<()> {
         anyhow::bail!("system browser opener exited unsuccessfully");
     }
     Ok(())
+}
+
+#[cfg(all(unix, not(test)))]
+fn process_tree_contains_sshd() -> bool {
+    let mut pid = unsafe { libc::getppid() };
+    for _ in 0..8 {
+        if pid <= 1 {
+            return false;
+        }
+        let Ok(output) = std::process::Command::new("ps")
+            .args(["-o", "ppid=", "-o", "comm=", "-p", &pid.to_string()])
+            .output()
+        else {
+            return false;
+        };
+        if !output.status.success() {
+            return false;
+        }
+        let line = String::from_utf8_lossy(&output.stdout);
+        let mut parts = line.split_whitespace();
+        let Some(parent) = parts
+            .next()
+            .and_then(|value| value.parse::<libc::pid_t>().ok())
+        else {
+            return false;
+        };
+        let command = parts.collect::<Vec<_>>().join(" ");
+        if command.contains("sshd") {
+            return true;
+        }
+        pid = parent;
+    }
+    false
 }
 
 fn open_browser_command(url: &str) -> std::process::Command {

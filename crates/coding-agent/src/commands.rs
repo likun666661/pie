@@ -1173,7 +1173,7 @@ async fn hub_join(argv: &[String], ctx: &CommandCtx<'_>) -> CommandOutcome {
     CommandOutcome::BackgroundTask {
         label: "hub join",
         task: Box::pin(async move {
-            cprintln!("Opening browser to join pie.0xfefe.me...");
+            cprintln!("Starting hub join for pie.0xfefe.me...");
             cprintln!("Waiting for browser login; you can keep using pie while this completes.");
             if let Err(e) = run_hub_join_background(&harness).await {
                 cprintln!(

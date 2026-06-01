@@ -524,7 +524,7 @@ async fn hub_join_command_success_outputs_safe_user_text_and_stores_credential()
 
     let text = capture.text();
     assert!(
-        text.contains("Opening browser to join pie.0xfefe.me"),
+        text.contains("Starting hub join for pie.0xfefe.me"),
         "{text}"
     );
     assert!(text.contains("Joined hub as alice@dongxu"), "{text}");
@@ -652,6 +652,92 @@ async fn hub_join_command_browser_open_failure_prints_manual_login_and_keeps_wai
     assert!(text.contains("hub is connected"), "{text}");
     assert!(!text.contains("redirect parameter"), "{text}");
     assert!(!text.contains("inside the login URL"), "{text}");
+}
+
+#[tokio::test]
+async fn hub_join_command_ssh_session_skips_browser_opener_and_prints_manual_login() {
+    let _auth_guard = auth::ENV_LOCK.lock().unwrap();
+    let _pie_guard = PIE_DIR_ENV_LOCK.lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let _pie_dir = EnvGuard::set("PIE_DIR", temp.path());
+    let _ssh_client = EnvGuard::set("SSH_CLIENT", "203.0.113.8 55122 22");
+    let _respect_headless = EnvGuard::set("PIE_HUB_JOIN_TEST_RESPECT_HEADLESS", "1");
+    auth::AuthStore::default().save().unwrap();
+
+    let server = FauxHubJoinServer::start().await;
+    let mcp_server = FauxHubMcpServer::start().await;
+    let _mcp_endpoint_guard =
+        mcp_loader::install_test_built_in_hub_endpoint(mcp_server.endpoint.clone());
+    let opener_called = Arc::new(Mutex::new(false));
+    let opener_called_for_opener = opener_called.clone();
+    let _join_guard = hub_join::install_test_join_runtime(server.origin.clone(), move |_| {
+        *opener_called_for_opener.lock().unwrap() = true;
+        Ok(())
+    });
+    let capture = OutputCapture::install();
+
+    let storage = Arc::new(MemorySessionStorage::new());
+    let session = Session::new(storage as Arc<dyn SessionStorage>);
+    let opts = AgentHarnessOptions::new(faux_model(), session);
+    let harness = Arc::new(AgentHarness::new(opts));
+    let registry = commands::Registry::with_builtins();
+    let cwd = std::env::current_dir().unwrap();
+    let ctx = commands::CommandCtx {
+        harness: &harness,
+        session_id: "test-hub-join-command-ssh-fallback",
+        log_path: None::<&PathBuf>,
+        tool_count: 0,
+        cwd: &cwd,
+    };
+
+    let outcome = commands::dispatch("/hub join", &registry, &ctx).await;
+    let task = match outcome {
+        commands::CommandOutcome::BackgroundTask { task, .. } => task,
+        other => panic!("expected BackgroundTask outcome, got {other:?}"),
+    };
+    let task = tokio::spawn(task);
+    for _ in 0..100 {
+        if capture
+            .text()
+            .contains("Open this login link in a browser:")
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    let text = capture.text();
+    assert!(
+        text.contains("SSH session detected"),
+        "expected SSH fallback, got:\n{text}"
+    );
+    assert!(
+        text.contains("Open this login link in a browser:"),
+        "{text}"
+    );
+    assert!(text.contains("callback port"), "{text}");
+    assert!(
+        !*opener_called.lock().unwrap(),
+        "SSH fallback must not invoke the browser opener"
+    );
+    assert!(!text.contains("hub_agent_"), "{text}");
+    assert!(!text.contains("hub_code_"), "{text}");
+    assert!(!text.contains("code_verifier"), "{text}");
+    assert!(!text.contains("/callback"), "{text}");
+
+    let callback_text = drive_faux_hub_join_browser(
+        "http://127.0.0.1/login?req=command-exchange-request-1&state=state-public",
+        server.state.clone(),
+    )
+    .await;
+    assert!(
+        callback_text.contains("Hub login complete"),
+        "{callback_text}"
+    );
+    task.await.unwrap();
+    let text = capture.text();
+    assert!(text.contains("Joined hub as alice@dongxu"), "{text}");
+    assert!(text.contains("hub is connected"), "{text}");
 }
 
 #[tokio::test]

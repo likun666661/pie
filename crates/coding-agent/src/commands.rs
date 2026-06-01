@@ -1343,7 +1343,7 @@ async fn hub_send(argv: &[String]) -> CommandOutcome {
     );
     cprintln!("  summary       {}", preview_hub_text(&args.summary, 120));
     cprintln!("  delivery      {}", render_hub_delivery(&receipt));
-    cprintln!("  payload       Local (not sent)");
+    cprintln!("  privacy       private payload stayed local");
     CommandOutcome::Handled
 }
 

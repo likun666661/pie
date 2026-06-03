@@ -44,7 +44,7 @@ mod trigger_prompt;
 mod triggers;
 mod ui;
 
-use std::io::IsTerminal as _;
+use std::io::{IsTerminal as _, Write as _};
 use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result};
@@ -80,11 +80,10 @@ struct Cli {
     )]
     thinking: String,
 
-    /// Resume the most recent session for this cwd (or pass --resume-id for a specific one).
+    /// Select a session for this cwd to resume. Use --resume-id for a specific one.
     #[arg(long)]
     resume: bool,
-    /// Continue the most recent session for this cwd. Alias for --resume; the conventional
-    /// short flag people reach for.
+    /// Continue the most recent session for this cwd.
     #[arg(long = "continue", short = 'c')]
     continue_: bool,
     /// Resume a specific session by id (full UUIDv7 or a unique prefix).
@@ -265,6 +264,106 @@ async fn delete_session_cmd(repo: &JsonlSessionRepo, id: &str) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum ResumeSessionChoice {
+    Clean,
+    Resume(usize),
+}
+
+async fn select_resume_session(
+    repo: &JsonlSessionRepo,
+    cwd: &std::path::Path,
+) -> Result<(pie_agent_core::Session, bool)> {
+    let mut entries = session::list_entries(repo).await?;
+    if entries.is_empty() {
+        anyhow::bail!("no sessions to resume in {}", repo.root().display());
+    }
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        anyhow::bail!(
+            "multiple sessions found in {}; run `pie --list-sessions` and resume one with `pie --resume-id <id>`",
+            repo.root().display()
+        );
+    }
+
+    entries.reverse();
+    match prompt_for_resume_session(repo, &entries).await? {
+        ResumeSessionChoice::Clean => Ok((session::create(repo, cwd).await?, false)),
+        ResumeSessionChoice::Resume(selected) => {
+            Ok((repo.open(&entries[selected].path).await?, true))
+        }
+    }
+}
+
+async fn prompt_for_resume_session(
+    repo: &JsonlSessionRepo,
+    entries: &[session::SessionEntry],
+) -> Result<ResumeSessionChoice> {
+    let menu = render_resume_session_menu(repo.root(), entries);
+    let count = entries.len();
+    tokio::task::spawn_blocking(move || {
+        print!("{menu}");
+        loop {
+            print!("resume session [0 clean, 1-{count}, q to cancel]: ");
+            std::io::stdout().flush().ok();
+
+            let mut line = String::new();
+            if std::io::stdin()
+                .read_line(&mut line)
+                .context("read resume selection")?
+                == 0
+            {
+                anyhow::bail!("resume selection cancelled");
+            }
+            match parse_resume_session_choice(&line, count) {
+                Ok(Some(choice)) => return Ok(choice),
+                Ok(None) => anyhow::bail!("resume selection cancelled"),
+                Err(e) => {
+                    println!("{e}");
+                }
+            }
+        }
+    })
+    .await
+    .context("resume selection prompt task")?
+}
+
+fn render_resume_session_menu(
+    repo_root: &std::path::Path,
+    entries: &[session::SessionEntry],
+) -> String {
+    let mut out = format!("sessions in {}:\n", repo_root.display());
+    out.push_str("  0. clean  start a new session\n");
+    for (idx, entry) in entries.iter().enumerate() {
+        let preview = entry.preview.as_deref().unwrap_or("");
+        let id_short: String = entry.id.chars().take(16).collect();
+        out.push_str(&format!(
+            "  {}. {}  {}  {}\n",
+            idx + 1,
+            id_short,
+            entry.created_at,
+            preview
+        ));
+    }
+    out
+}
+
+fn parse_resume_session_choice(input: &str, count: usize) -> Result<Option<ResumeSessionChoice>> {
+    let trimmed = input.trim();
+    if trimmed.eq_ignore_ascii_case("q") || trimmed.eq_ignore_ascii_case("quit") {
+        return Ok(None);
+    }
+    let number = trimmed.parse::<usize>().with_context(|| {
+        format!("enter 0 for clean, a number from 1 to {count}, or q to cancel")
+    })?;
+    if number == 0 {
+        return Ok(Some(ResumeSessionChoice::Clean));
+    }
+    if !(1..=count).contains(&number) {
+        anyhow::bail!("enter 0 for clean, a number from 1 to {count}, or q to cancel");
+    }
+    Ok(Some(ResumeSessionChoice::Resume(number - 1)))
+}
+
 async fn run_repl(mut cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo) -> Result<()> {
     let run_web = should_run_web(&cli);
     let cli_base_url = cli.base_url.clone();
@@ -280,11 +379,17 @@ async fn run_repl(mut cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo)
     }
     let thinking = parse_thinking(&cli.thinking)?;
 
-    // Resolve / create the session. `--continue` is just `--resume` without an id.
+    // Resolve / create the session. `--resume` asks the user which cwd-scoped transcript to
+    // reopen, while `--continue` keeps the old "newest session" fast path.
     let should_resume = cli.resume || cli.continue_ || cli.resume_id.is_some();
     let (session, resumed) = if should_resume {
-        let s = session::resume(&repo, cli.resume_id.as_deref()).await?;
-        (s, true)
+        if let Some(id) = cli.resume_id.as_deref() {
+            (session::resume(&repo, Some(id)).await?, true)
+        } else if cli.resume {
+            select_resume_session(&repo, &cwd).await?
+        } else {
+            (session::resume(&repo, None).await?, true)
+        }
     } else {
         let s = session::create(&repo, &cwd).await?;
         (s, false)
@@ -1203,6 +1308,57 @@ mod tests {
         assert!(is_remote_tty_env(|name| name == "SSH_CONNECTION"));
         assert!(is_remote_tty_env(|name| name == "MOSH_CONNECTION"));
         assert!(!is_remote_tty_env(|_| false));
+    }
+
+    #[test]
+    fn resume_session_choice_parses_numbers_and_cancel() {
+        assert_eq!(
+            parse_resume_session_choice("0", 3).unwrap(),
+            Some(ResumeSessionChoice::Clean)
+        );
+        assert_eq!(
+            parse_resume_session_choice("1\n", 3).unwrap(),
+            Some(ResumeSessionChoice::Resume(0))
+        );
+        assert_eq!(
+            parse_resume_session_choice("3", 3).unwrap(),
+            Some(ResumeSessionChoice::Resume(2))
+        );
+        assert_eq!(parse_resume_session_choice("q", 3).unwrap(), None);
+        assert_eq!(parse_resume_session_choice("QUIT", 3).unwrap(), None);
+
+        let err = parse_resume_session_choice("4", 3).unwrap_err().to_string();
+        assert!(err.contains("enter 0 for clean"), "{err}");
+        let err = parse_resume_session_choice("abc", 3)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("enter 0 for clean"), "{err}");
+    }
+
+    #[test]
+    fn resume_session_menu_shows_short_ids_timestamps_and_previews() {
+        let entries = vec![
+            session::SessionEntry {
+                path: std::path::PathBuf::from("/tmp/session-a.jsonl"),
+                id: "0123456789abcdef-extra".into(),
+                created_at: "2026-06-03T09:00:00Z".into(),
+                preview: Some("fix parser".into()),
+            },
+            session::SessionEntry {
+                path: std::path::PathBuf::from("/tmp/session-b.jsonl"),
+                id: "fedcba9876543210-extra".into(),
+                created_at: "2026-06-03T10:00:00Z".into(),
+                preview: None,
+            },
+        ];
+        let menu = render_resume_session_menu(std::path::Path::new("/tmp/sessions"), &entries);
+
+        assert!(menu.contains("sessions in /tmp/sessions:"), "{menu}");
+        assert!(menu.contains("0. clean  start a new session"), "{menu}");
+        assert!(menu.contains("1. 0123456789abcdef"), "{menu}");
+        assert!(menu.contains("2026-06-03T09:00:00Z"), "{menu}");
+        assert!(menu.contains("fix parser"), "{menu}");
+        assert!(menu.contains("2. fedcba9876543210"), "{menu}");
     }
 
     #[tokio::test]

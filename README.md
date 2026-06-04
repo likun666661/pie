@@ -3,6 +3,12 @@
 `pie` is a Rust rewrite of the original [pi](https://github.com/earendil-works/pi) project (pi-coding-agent). `pie` is a terminal-based AI coding agent, run it inside a project, ask it to inspect files, make edits,
 run shell commands, remember preferences, and continue previous sessions.
 
+The initial reason was that I had some proactive, long-term automated tasks to run on a local DS v4 model. Therefore, I needed a customizable agent runtime to support these custom tasks, such as triggers, to perform some simple automation, Over time, the project gradually became more and more usable, so I thought I might as well turn it into a proper project. Of course, most of the code in this project was written by AI. If you’re sensitive to AI-generated code or AI coding, feel free to simply ignore it.
+
+Pie runs inside your local project directory, can inspect/edit files, run shell commands, keep resumable sessions, and use different model providers, including local OpenAI-compatible servers.
+
+The goal is not just to build another chat UI for coding, but a local agent runtime for developer workflows: slash commands, session history, skills, MCP tools, cron/triggers, and a small hub so agents running on different machines can send messages to each other.
+
 ## Install / build
 
 ```bash

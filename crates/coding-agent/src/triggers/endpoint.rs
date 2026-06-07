@@ -13,13 +13,15 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use once_cell::sync::OnceCell;
 use parking_lot::Mutex;
 use pie_agent_core::{
-    BeforeTriggerActionContext, BeforeTriggerActionHook, CredentialScope, PayloadVisibility,
-    PromoteAction, ReplacementPolicy, SourceKind, Trigger, TriggerAction, TriggerAuthority,
-    TriggerDelivery, TriggerSource,
+    BeforeTriggerActionContext, BeforeTriggerActionHook, CredentialScope, HookError, HookState,
+    NotificationHook, NotificationHookStatus, PayloadVisibility, PromoteAction, ReplacementPolicy,
+    SourceKind, Trigger, TriggerAction, TriggerAuthority, TriggerDelivery, TriggerSink,
+    TriggerSource,
 };
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
@@ -313,6 +315,111 @@ pub fn map_endpoint_message(
         },
         received_at: Utc::now(),
     })
+}
+
+/// Rebuild SSE-frame-shaped params from an inbox item's Shared payload so backlog
+/// replay reuses the exact live mapping path (`map_endpoint_message`).
+pub fn replay_params(
+    notification_id: &str,
+    payload: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    let endpoint_id = payload.get("endpoint_id")?.as_str()?;
+    Some(serde_json::json!({
+        "notification_id": notification_id,
+        "endpoint_id": endpoint_id,
+        "label": payload.get("label"),
+        "mode": payload.get("mode"),
+        "content_type": payload.get("content_type"),
+        "body": payload.get("body"),
+        "received_at": payload.get("received_at"),
+    }))
+}
+
+/// One-shot `NotificationHook`: on session start, pull the hub inbox backlog and inject
+/// any un-acked endpoint messages this session owns. Acks happen downstream in
+/// `endpoint_action_hook` — the same path live SSE messages take — so a message is only
+/// acked once the owning session accepts it. Foreign endpoint messages are skipped and
+/// stay in the backlog for their owner.
+pub struct EndpointBacklogHook {
+    registry: EndpointRegistry,
+    status: Arc<Mutex<NotificationHookStatus>>,
+}
+
+impl EndpointBacklogHook {
+    pub fn new(registry: EndpointRegistry) -> Self {
+        let mut status = NotificationHookStatus::pending();
+        status.subscription_labels = vec!["hub:endpoint-backlog".into()];
+        Self {
+            registry,
+            status: Arc::new(Mutex::new(status)),
+        }
+    }
+}
+
+#[async_trait]
+impl NotificationHook for EndpointBacklogHook {
+    fn label(&self) -> &str {
+        "hub:endpoint-backlog"
+    }
+
+    async fn run(&self, sink: TriggerSink) -> Result<(), HookError> {
+        self.status.lock().state = HookState::Connected;
+        let client = match crate::hub_client::HubClient::connect_default().await {
+            Ok(client) => client,
+            Err(e) => {
+                // No hub credential / hub unreachable — replay is best-effort.
+                self.status.lock().state = HookState::Disconnected {
+                    reason: format!("backlog replay skipped: {e}"),
+                };
+                return Ok(());
+            }
+        };
+        let items = match client.list_inbox_backlog(100).await {
+            Ok(items) => items,
+            Err(e) => {
+                client.close().await;
+                self.status.lock().state = HookState::Disconnected {
+                    reason: format!("backlog list failed: {e}"),
+                };
+                return Ok(());
+            }
+        };
+        client.close().await;
+        let mut replayed = 0usize;
+        for item in items {
+            let Some(notification_id) = item.notification_id.as_deref() else {
+                continue;
+            };
+            let Some(payload) = item.payload.as_ref() else {
+                continue;
+            };
+            let Some(params) = replay_params(notification_id, payload) else {
+                continue;
+            };
+            let Some(trigger) =
+                map_endpoint_message(crate::config::HUB_SERVER_NAME, &params, &self.registry)
+            else {
+                continue; // foreign or malformed — leave in backlog
+            };
+            if sink.send(trigger).is_err() {
+                self.status.lock().state = HookState::Disconnected {
+                    reason: "sink closed".into(),
+                };
+                return Err(HookError::SinkClosed);
+            }
+            replayed += 1;
+        }
+        let mut status = self.status.lock();
+        status.last_event_at = Some(Utc::now());
+        status.state = HookState::Disconnected {
+            reason: format!("backlog replay complete ({replayed} message(s))"),
+        };
+        Ok(())
+    }
+
+    fn status(&self) -> NotificationHookStatus {
+        self.status.lock().clone()
+    }
 }
 
 fn read_bindings_file(path: &Path) -> Result<Vec<EndpointBinding>, EndpointStorageError> {
@@ -664,5 +771,48 @@ mod tests {
         let action = hook(ctx, CancellationToken::new()).await;
         assert!(matches!(action.delivery, TriggerDelivery::SubAgent));
         assert!(acked.lock().is_empty());
+    }
+
+    #[test]
+    fn replay_params_rebuilds_sse_shape_from_inbox_payload() {
+        let payload = json!({
+            "endpoint_id": "ep-1",
+            "label": "ci",
+            "mode": "run",
+            "content_type": "text/plain",
+            "body": "backlogged",
+            "received_at": "2026-06-07T00:00:00Z"
+        });
+        let params = replay_params("22222222-2222-4222-8222-222222222222", &payload)
+            .expect("payload converts");
+        assert_eq!(
+            params.get("notification_id").and_then(|v| v.as_str()),
+            Some("22222222-2222-4222-8222-222222222222")
+        );
+        assert_eq!(
+            params.get("body").and_then(|v| v.as_str()),
+            Some("backlogged")
+        );
+        assert_eq!(
+            params.get("endpoint_id").and_then(|v| v.as_str()),
+            Some("ep-1")
+        );
+
+        // The rebuilt params feed straight into the live mapping path.
+        let registry = EndpointRegistry::new();
+        registry
+            .add_binding(binding("ep-1", EndpointMode::Run))
+            .expect("add");
+        let trigger = map_endpoint_message("pie-hub", &params, &registry).expect("replay maps");
+        assert_eq!(
+            trigger.idempotency_key,
+            "mcp:pie-hub:endpoint:22222222-2222-4222-8222-222222222222"
+        );
+    }
+
+    #[test]
+    fn replay_params_rejects_non_endpoint_payload() {
+        assert!(replay_params("id-1", &json!({ "something": "else" })).is_none());
+        assert!(replay_params("id-1", &json!("not an object")).is_none());
     }
 }

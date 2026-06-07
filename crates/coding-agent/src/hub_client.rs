@@ -72,13 +72,11 @@ impl HubAgentSummary {
 #[derive(Debug, Clone, Deserialize)]
 pub struct HubInboxItem {
     #[serde(default)]
-    #[allow(dead_code)] // staged: consumed by Tasks 10-12
     pub notification_id: Option<String>,
     pub sender: String,
     pub summary: String,
     pub payload_visibility: String,
     #[serde(default)]
-    #[allow(dead_code)] // staged: consumed by Tasks 10-12
     pub payload: Option<serde_json::Value>,
     pub first_contact_required: bool,
     pub status: String,
@@ -245,7 +243,6 @@ impl HubClient {
 
     /// Inbox page for backlog replay. Unlike `list_inbox` (display-clamped to 10), this
     /// uses the hub's real page cap.
-    #[allow(dead_code)] // staged: consumed by Tasks 10-12
     pub async fn list_inbox_backlog(&self, limit: usize) -> Result<Vec<HubInboxItem>> {
         let page: Page<HubInboxItem> = self
             .call_json("list_my_inbox", json!({ "limit": limit.clamp(1, 100) }))

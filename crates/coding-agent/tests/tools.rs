@@ -24,6 +24,18 @@ mod skills_state;
 #[path = "../src/tools/mod.rs"]
 #[allow(dead_code)]
 mod tools;
+// Minimal stub: hub_client needs only these two constants from mcp_loader.
+#[allow(dead_code)]
+mod mcp_loader {
+    pub const BUILT_IN_HUB_TOKEN_REF: &str = "pie-hub:default";
+    pub const BUILT_IN_HUB_ENDPOINT: &str = "https://pie.0xfefe.me/mcp";
+}
+#[path = "../src/auth.rs"]
+#[allow(dead_code)]
+mod auth;
+#[path = "../src/hub_client.rs"]
+#[allow(dead_code)]
+mod hub_client;
 #[path = "../src/triggers/mod.rs"]
 #[allow(dead_code)]
 mod triggers;

@@ -674,7 +674,7 @@ class D1Store implements Store {
       .prepare(
         `DELETE FROM notifications
          WHERE receiver_agent_id = ? AND sender_namespace = 'endpoint'
-           AND status IN ('pending', 'delivered') AND created_at < ?`,
+           AND created_at < ?`,
       )
       .bind(receiverAgentId, beforeIso)
       .run();
@@ -903,7 +903,6 @@ export class MemoryStore implements Store {
       if (
         n.receiver_agent_id === receiverAgentId &&
         n.sender_namespace === "endpoint" &&
-        (n.status === "pending" || n.status === "delivered") &&
         n.created_at < beforeIso
       ) {
         this.notifications.delete(id);
@@ -2232,7 +2231,8 @@ ${chatStyle()}
       return json({ error: "not_found" }, 404);
     }
     const now = nowIso();
-    // Fixed one-minute window: "2026-06-07T12:34" buckets.
+    // Fixed one-minute window: "2026-06-07T12:34" buckets. Deliberately non-atomic —
+    // concurrent bursts can slightly exceed the limit; acceptable for webhook ingestion.
     const windowStart = now.slice(0, 16);
     const count = endpoint.rl_window_start === windowStart ? endpoint.rl_count + 1 : 1;
     if (count > ENDPOINT_RATE_LIMIT_PER_MINUTE) {

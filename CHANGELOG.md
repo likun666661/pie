@@ -66,6 +66,11 @@ versions sync across all workspace crates per the lockstep policy in `AGENTS.md`
 - Public webhook endpoints: `/endpoint register` mints a hub capability URL
   (`https://pie.0xfefe.me/e/<token>`); external POSTs inject into the owning session
   (run/summary modes), with hub backlog replay on resume. (docs/endpoints.md)
+- `pie --resume <id>` now resumes a specific session directly (same as `--resume-id`);
+  bare `--resume` keeps the picker.
+- pie starts without a model API key (warning instead of a hard error), so
+  notification-only sessions — e.g. summary-mode webhook endpoints — work as a pure
+  inbox; the first model turn surfaces the auth error and `/login` fixes it live.
 - **#66** `/triggers` slash command for the RFC 1 trigger surface. It now shows runtime
   counters, hook health, running trigger actions, recent trigger audit rows, and supports
   aborting one or all in-flight trigger actions from the terminal while rendering only

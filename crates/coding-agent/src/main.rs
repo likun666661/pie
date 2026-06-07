@@ -80,9 +80,10 @@ struct Cli {
     )]
     thinking: String,
 
-    /// Select a session for this cwd to resume. Use --resume-id for a specific one.
-    #[arg(long)]
-    resume: bool,
+    /// Select a session for this cwd to resume. Pass an id to resume a specific one
+    /// directly (same as --resume-id); bare --resume opens the picker.
+    #[arg(long, value_name = "ID", num_args = 0..=1)]
+    resume: Option<Option<String>>,
     /// Continue the most recent session for this cwd.
     #[arg(long = "continue", short = 'c')]
     continue_: bool,
@@ -159,6 +160,16 @@ struct Cli {
     /// Port for `--web`; use 0 to bind a random free port.
     #[arg(long = "web-port", default_value_t = 0, value_name = "PORT")]
     web_port: u16,
+}
+
+impl Cli {
+    /// Session id to resume, merging both spellings: `--resume-id <id>` wins, then
+    /// `--resume <id>`. Bare `--resume` (the picker) yields `None`.
+    fn effective_resume_id(&self) -> Option<&str> {
+        self.resume_id
+            .as_deref()
+            .or_else(|| self.resume.as_ref().and_then(|inner| inner.as_deref()))
+    }
 }
 
 #[tokio::main]
@@ -369,7 +380,22 @@ async fn run_repl(mut cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo)
     let cli_base_url = cli.base_url.clone();
     validate_base_url_override(&cli)?;
     let local_models = local_models::load_all(&cwd, cli_base_url.as_deref()).await?;
-    let mut model = model::auto_detect_model(cli.provider.as_deref(), cli.model.as_deref())?;
+    let mut model_credential_warning: Option<String> = None;
+    let mut model = match model::auto_detect_model(cli.provider.as_deref(), cli.model.as_deref()) {
+        Ok(model) => model,
+        // No credential anywhere and no explicit override: start anyway so
+        // notification-only sessions (e.g. summary-mode webhook endpoints) still work.
+        // The first model turn surfaces the auth error; `/login` fixes it live.
+        Err(e)
+            if cli.provider.is_none()
+                && cli.model.is_none()
+                && e.to_string().starts_with("no API key found") =>
+        {
+            model_credential_warning = Some(e.to_string());
+            model::credential_less_default()
+        }
+        Err(e) => return Err(e),
+    };
     if let Some(base_url) = cli_base_url
         .as_deref()
         .map(str::trim)
@@ -381,11 +407,11 @@ async fn run_repl(mut cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo)
 
     // Resolve / create the session. `--resume` asks the user which cwd-scoped transcript to
     // reopen, while `--continue` keeps the old "newest session" fast path.
-    let should_resume = cli.resume || cli.continue_ || cli.resume_id.is_some();
+    let should_resume = cli.resume.is_some() || cli.continue_ || cli.resume_id.is_some();
     let (session, resumed) = if should_resume {
-        if let Some(id) = cli.resume_id.as_deref() {
+        if let Some(id) = cli.effective_resume_id() {
             (session::resume(&repo, Some(id)).await?, true)
-        } else if cli.resume {
+        } else if cli.resume.is_some() {
             select_resume_session(&repo, &cwd).await?
         } else {
             (session::resume(&repo, None).await?, true)
@@ -790,6 +816,12 @@ async fn run_repl(mut cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo)
                 .map(|s| s.name.as_str())
                 .collect::<Vec<_>>()
                 .join(", ")
+        ));
+    }
+    if let Some(warning) = &model_credential_warning {
+        app.error_line(format!(
+            "warning: {warning} Started without a model — chat turns will fail until a key is \
+             provided; notification-only features (e.g. webhook endpoints) still work."
         ));
     }
     if let Some(err) = &dynamic_trigger_load_error {
@@ -1239,6 +1271,37 @@ async fn read_hub_inject_mode(
 mod tests {
     use super::*;
 
+    #[test]
+    fn resume_flag_accepts_optional_session_id() {
+        use clap::Parser;
+        // Bare --resume keeps the picker behavior.
+        let bare = Cli::try_parse_from(["pie", "--resume"]).expect("bare --resume parses");
+        assert!(bare.resume.is_some());
+        assert_eq!(bare.effective_resume_id(), None);
+
+        // --resume <id> behaves like --resume-id <id>.
+        let with_id =
+            Cli::try_parse_from(["pie", "--resume", "019ea2fd"]).expect("--resume with id");
+        assert_eq!(with_id.effective_resume_id(), Some("019ea2fd"));
+
+        // --resume-id still works and wins when both are given.
+        let both =
+            Cli::try_parse_from(["pie", "--resume", "aaa", "--resume-id", "bbb"]).expect("both");
+        assert_eq!(both.effective_resume_id(), Some("bbb"));
+
+        // --resume followed by another flag must not swallow the flag as its value.
+        let with_flag =
+            Cli::try_parse_from(["pie", "--resume", "--web"]).expect("flag not swallowed");
+        assert_eq!(with_flag.effective_resume_id(), None);
+        assert!(with_flag.resume.is_some());
+        assert!(with_flag.web);
+
+        // Absent entirely.
+        let none = Cli::try_parse_from(["pie"]).expect("no flags");
+        assert!(none.resume.is_none());
+        assert_eq!(none.effective_resume_id(), None);
+    }
+
     fn model(provider: &str) -> pie_ai::Model {
         pie_ai::Model {
             id: "deepseek-v4-flash".into(),
@@ -1289,7 +1352,7 @@ mod tests {
             model: Some("deepseek-v4-flash".into()),
             base_url: Some("http://user:secret-token@127.0.0.1:8000/v1?token=secret".into()),
             thinking: "off".into(),
-            resume: false,
+            resume: None,
             continue_: false,
             resume_id: None,
             list_sessions: false,

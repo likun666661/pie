@@ -36,10 +36,17 @@ backlogs and the session replays on resume); `404` unknown or revoked token; `41
 ## Offline behavior
 
 Messages POSTed while the session is offline stay in the hub backlog (un-acked
-notifications). When the session resumes (or pie restarts), a one-shot replay hook pulls
-the backlog and injects owned endpoint messages in order. Endpoint messages older than
+notifications). When the session resumes (`pie --resume <session-id>`, or bare
+`pie --resume` for the picker), a one-shot replay hook pulls the backlog and injects
+owned endpoint messages in order. Endpoint messages older than
 7 days are dropped lazily. Multiple sessions of the same hub agent can hold different
 endpoints; each message is delivered to (and acked by) the owning session only.
+
+## Notification-only sessions
+
+pie starts even without a model API key (it prints a warning). A session holding only
+`summary`-mode endpoints works fully without one — useful as a pure notification inbox.
+`run`-mode delivery needs a model key (env var or `/login`) for the reaction turn.
 
 ## Security notes
 

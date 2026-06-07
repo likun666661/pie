@@ -68,6 +68,16 @@ pub fn auto_detect_model(
     );
 }
 
+/// Catalog default used when no credential exists anywhere. Lets pie start for
+/// notification-only sessions (e.g. summary-mode webhook endpoints); the first model
+/// turn surfaces the auth error instead, and `/login` or an env key fixes it live.
+pub fn credential_less_default() -> Model {
+    let (_, provider, model_id) = CANDIDATES[0];
+    get_model(&Provider::from(provider), model_id)
+        .or_else(|| pie_ai::list_models().into_iter().next())
+        .expect("embedded model catalog is never empty")
+}
+
 fn explicit_model_not_found_message(provider: &str, id: &str, show_local_hint: bool) -> String {
     let mut by_provider = std::collections::BTreeMap::<String, Vec<String>>::new();
     for model in pie_ai::list_models() {
@@ -119,6 +129,14 @@ fn first_model_for_provider(provider: &str) -> Option<Model> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn credential_less_default_is_a_catalog_model() {
+        let m = credential_less_default();
+        assert!(!m.id.is_empty());
+        // Must come straight from the embedded catalog so streaming setup works.
+        assert!(pie_ai::get_model(&m.provider, &m.id).is_some());
+    }
 
     fn local_model(provider: &str, id: &str) -> Model {
         Model {

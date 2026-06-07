@@ -70,10 +70,12 @@ external caller            hub (workers/fefe-hub)              local pie
      in the backlog for the owning session);
    - owned → build a `Trigger` with `payload_summary` derived from the body and
      deliver per the endpoint's mode (`run` default).
-5. The client acks (`ack_notification`) only after successful injection. Failed
-   injection leaves the notification un-acked for retry on next connect; the
-   trigger runtime's 5-minute dedup window guards against short-term double
-   injection.
+5. The client acks (`ack_notification`) the moment the owning session accepts the
+   message (in the `before_trigger_action` hook, just before the actual inject).
+   Delivery is at-least-once: a failed ack means one redundant replay later (deduped
+   within the runtime's 5-minute window); an inject failure after a successful ack
+   loses that message — a deliberately accepted tiny window, since the inject is an
+   in-memory enqueue.
 
 ### Offline / resume behavior
 

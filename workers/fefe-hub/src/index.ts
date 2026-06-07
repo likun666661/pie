@@ -645,7 +645,7 @@ class D1Store implements Store {
 
   async listEndpoints(ownerAgentId: string): Promise<EndpointRecord[]> {
     const result = await this.db
-      .prepare("SELECT * FROM endpoints WHERE owner_agent_id = ? ORDER BY created_at")
+      .prepare("SELECT * FROM endpoints WHERE owner_agent_id = ? ORDER BY created_at, endpoint_id")
       .bind(ownerAgentId)
       .all<EndpointRecord>();
     return result.results ?? [];
@@ -876,7 +876,10 @@ export class MemoryStore implements Store {
   async listEndpoints(ownerAgentId: string): Promise<EndpointRecord[]> {
     return [...this.endpoints.values()]
       .filter((e) => e.owner_agent_id === ownerAgentId)
-      .sort((a, b) => a.created_at.localeCompare(b.created_at));
+      .sort(
+        (a, b) =>
+          a.created_at.localeCompare(b.created_at) || a.endpoint_id.localeCompare(b.endpoint_id),
+      );
   }
 
   async revokeEndpoint(endpointId: string, ownerAgentId: string, revokedAt: string): Promise<boolean> {

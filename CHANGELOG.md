@@ -63,6 +63,9 @@ versions sync across all workspace crates per the lockstep policy in `AGENTS.md`
   works on a clean install without `mcp.toml`, and the loader auto-enables the canonical
   `pie-hub` transport after the local hub credential exists without emitting missing-token
   startup diagnostics.
+- Public webhook endpoints: `/endpoint register` mints a hub capability URL
+  (`https://pie.0xfefe.me/e/<token>`); external POSTs inject into the owning session
+  (run/summary modes), with hub backlog replay on resume. (docs/endpoints.md)
 - **#66** `/triggers` slash command for the RFC 1 trigger surface. It now shows runtime
   counters, hook health, running trigger actions, recent trigger audit rows, and supports
   aborting one or all in-flight trigger actions from the terminal while rendering only

@@ -136,13 +136,20 @@ impl NotificationHook for McpNotificationHook {
             let trigger = match map_notification(&self.server_name, &notification) {
                 Some(t) => t,
                 None => {
-                    // Custom notification without a dedup key — drop and surface count.
+                    // Endpoint frame not owned by this session, or a custom notification
+                    // without a dedup key — drop and surface count.
                     let mut st = self.status.lock();
                     st.dropped_count = st.dropped_count.saturating_add(1);
-                    st.last_error = Some(format!(
-                        "dropped custom notification {:?}: missing `_meta.pie_dedup_key` or `_pie_dedup_key`",
-                        notification.method
-                    ));
+                    st.last_error = Some(
+                        if notification.method == "notifications/endpoint_message" {
+                            "ignored endpoint message not bound to this session".to_string()
+                        } else {
+                            format!(
+                                "dropped custom notification {:?}: missing `_meta.pie_dedup_key` or `_pie_dedup_key`",
+                                notification.method
+                            )
+                        },
+                    );
                     continue;
                 }
             };

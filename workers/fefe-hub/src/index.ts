@@ -2876,6 +2876,7 @@ function isSecretLikeDisplayPart(value: string): boolean {
     lower.startsWith("hub_agent") ||
     lower.startsWith("hub_hs") ||
     lower.startsWith("hub_code") ||
+    lower.startsWith("hub_ep") ||
     lower.startsWith("sk-") ||
     lower.startsWith("gho_") ||
     lower.startsWith("xoxb-") ||

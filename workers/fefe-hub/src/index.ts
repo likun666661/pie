@@ -1077,6 +1077,9 @@ export class HubApp {
       if (url.pathname === "/mcp" && request.method === "POST") {
         return this.handleMcpPost(request);
       }
+      if (request.method === "POST" && url.pathname.startsWith("/e/")) {
+        return this.handleEndpointPost(request, url);
+      }
       return json({ error: "not_found" }, 404);
     } catch (error) {
       return httpError(error);
@@ -2211,6 +2214,64 @@ ${chatStyle()}
     };
   }
 
+  private async handleEndpointPost(request: Request, url: URL): Promise<Response> {
+    const token = url.pathname.slice("/e/".length);
+    if (!/^hub_ep_[A-Za-z0-9_-]{16,160}$/.test(token)) {
+      return json({ error: "not_found" }, 404);
+    }
+    const bodyText = await request.text();
+    if (byteLength(bodyText) > ENDPOINT_BODY_LIMIT_BYTES) {
+      return json({ error: "body_too_large", cap_bytes: ENDPOINT_BODY_LIMIT_BYTES }, 413);
+    }
+    const endpoint = await this.store.getEndpointByTokenHash(await sha256Hex(token));
+    if (!endpoint || endpoint.revoked_at) {
+      return json({ error: "not_found" }, 404);
+    }
+    const owner = await this.store.getAgent(endpoint.owner_agent_id);
+    if (!owner || owner.deleted_at) {
+      return json({ error: "not_found" }, 404);
+    }
+    const now = nowIso();
+    // Fixed one-minute window: "2026-06-07T12:34" buckets.
+    const windowStart = now.slice(0, 16);
+    const count = endpoint.rl_window_start === windowStart ? endpoint.rl_count + 1 : 1;
+    if (count > ENDPOINT_RATE_LIMIT_PER_MINUTE) {
+      return json({ error: "rate_limited" }, 429);
+    }
+    await this.store.updateEndpointUsage(endpoint.endpoint_id, windowStart, count, now);
+    // Lazy TTL backstop: the notifications table has no other cleanup path.
+    await this.store.deleteExpiredEndpointNotifications(owner.agent_id, daysAgoIso(ENDPOINT_BACKLOG_TTL_DAYS));
+    const notification: NotificationRecord = {
+      notification_id: crypto.randomUUID(),
+      receiver_agent_id: owner.agent_id,
+      sender_agent_id: owner.agent_id,
+      sender_handle: endpoint.endpoint_id,
+      sender_namespace: "endpoint",
+      // Bounded display summary only — the raw body lives in payload_json (Shared).
+      summary: `endpoint ${endpoint.label}: message received`,
+      payload_json: JSON.stringify({
+        endpoint_id: endpoint.endpoint_id,
+        label: endpoint.label,
+        mode: endpoint.mode,
+        content_type: request.headers.get("content-type") ?? "application/octet-stream",
+        body: bodyText,
+        received_at: now,
+      }),
+      payload_visibility: "Shared",
+      status: "pending",
+      first_contact_required: 0,
+      created_at: now,
+      delivered_at: null,
+      acked_at: null,
+    };
+    await this.store.createNotification(notification);
+    const delivered = await this.mailbox.push(owner.agent_id, notification);
+    if (delivered) {
+      await this.store.markNotificationDelivered(notification.notification_id, nowIso());
+    }
+    return json({ ok: true, id: notification.notification_id }, 202);
+  }
+
   private async listMyInbox(principal: Principal, args: Record<string, unknown>): Promise<unknown> {
     assertAgent(principal);
     requirePermission(principal, "notification:receive");
@@ -2920,6 +2981,7 @@ function inboxItem(notification: NotificationRecord): Record<string, unknown> {
     sender: `@${notification.sender_handle}@${notification.sender_namespace}`,
     summary: notification.summary,
     payload_visibility: notification.payload_visibility,
+    payload: notification.payload_visibility === "Shared" ? safeJsonParse(notification.payload_json) : undefined,
     first_contact_required: notification.first_contact_required === 1,
     status: notification.status,
     created_at: notification.created_at,
@@ -3009,6 +3071,10 @@ function nowIso(): string {
 
 function addDaysIso(days: number): string {
   return new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
+}
+
+function daysAgoIso(days: number): string {
+  return new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
 }
 
 function addSecondsIso(seconds: number): string {

@@ -1054,6 +1054,118 @@ test("register_endpoint rejects bad mode and another agent cannot revoke", async
   assert.equal(stolen.error.data.name, "not_found");
 });
 
+test("endpoint POST accepts, backlogs, rate limits, and 404s uniformly", async () => {
+  const app = createTestApp();
+  const alice = await registerUser(app, "eppost");
+  const agent = await callTool(app, alice.session_token, "register_agent", {
+    handle: "eppostagent",
+    display_name: "Poster",
+    description: "endpoint post test agent",
+    capabilities: [],
+  });
+  const registered = await callTool(app, agent.hub_token, "register_endpoint", { label: "ci" });
+  const path = new URL(registered.url).pathname;
+
+  // Happy path: 202 with an id; lands in the inbox with the Shared payload body.
+  const accepted = await app.fetch(
+    new Request(`${BASE}${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ build: 42, status: "red" }),
+    }),
+  );
+  assert.equal(accepted.status, 202);
+  const receipt = await accepted.json();
+  assert.equal(receipt.ok, true);
+  assert.match(receipt.id, /^[0-9a-f-]{36}$/);
+
+  const inbox = await callTool(app, agent.hub_token, "list_my_inbox", {});
+  assert.equal(inbox.items.length, 1);
+  const item = inbox.items[0];
+  assert.equal(item.notification_id, receipt.id);
+  assert.equal(item.payload_visibility, "Shared");
+  assert.equal(item.payload.endpoint_id, registered.endpoint_id);
+  assert.equal(item.payload.label, "ci");
+  assert.equal(item.payload.mode, "run");
+  assert.equal(item.payload.body, JSON.stringify({ build: 42, status: "red" }));
+  assert.equal(item.payload.content_type, "application/json");
+  // The D1-visible summary stays bounded and never embeds the raw body.
+  assert.doesNotMatch(item.summary, /build/);
+
+  // Unknown token and revoked token both 404 with the same body.
+  const unknown = await app.fetch(new Request(`${BASE}/e/hub_ep_${"a".repeat(64)}`, { method: "POST", body: "x" }));
+  assert.equal(unknown.status, 404);
+  await callTool(app, agent.hub_token, "revoke_endpoint", { endpoint_id: registered.endpoint_id });
+  const revoked = await app.fetch(new Request(`${BASE}${path}`, { method: "POST", body: "x" }));
+  assert.equal(revoked.status, 404);
+  assert.deepEqual(await revoked.json(), await unknown.json());
+});
+
+test("endpoint POST enforces body cap and per-minute rate limit", async () => {
+  const app = createTestApp();
+  const alice = await registerUser(app, "eplimits");
+  const agent = await callTool(app, alice.session_token, "register_agent", {
+    handle: "eplimitsagent",
+    display_name: "Limits",
+    description: "endpoint limits test agent",
+    capabilities: [],
+  });
+  const registered = await callTool(app, agent.hub_token, "register_endpoint", {});
+  const path = new URL(registered.url).pathname;
+
+  const oversize = await app.fetch(
+    new Request(`${BASE}${path}`, { method: "POST", body: "x".repeat(64 * 1024 + 1) }),
+  );
+  assert.equal(oversize.status, 413);
+
+  let lastStatus = 0;
+  for (let i = 0; i < 121; i += 1) {
+    const response = await app.fetch(new Request(`${BASE}${path}`, { method: "POST", body: `n${i}` }));
+    lastStatus = response.status;
+  }
+  assert.equal(lastStatus, 429);
+});
+
+test("endpoint POST lazily drops un-acked endpoint backlog older than 7 days", async () => {
+  const store = new MemoryStore();
+  const app = createTestApp(store);
+  const alice = await registerUser(app, "epttl");
+  const agent = await callTool(app, alice.session_token, "register_agent", {
+    handle: "epttlagent",
+    display_name: "TTL",
+    description: "endpoint ttl test agent",
+    capabilities: [],
+  });
+  const registered = await callTool(app, agent.hub_token, "register_endpoint", {});
+  const path = new URL(registered.url).pathname;
+
+  // Plant a stale endpoint notification directly in the store.
+  const staleAt = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString();
+  await store.createNotification({
+    notification_id: "00000000-0000-4000-8000-00000000aaaa",
+    receiver_agent_id: agent.agent.agent_id,
+    sender_agent_id: agent.agent.agent_id,
+    sender_handle: registered.endpoint_id,
+    sender_namespace: "endpoint",
+    summary: "endpoint default: message received",
+    payload_json: JSON.stringify({ endpoint_id: registered.endpoint_id, body: "old" }),
+    payload_visibility: "Shared",
+    status: "pending",
+    first_contact_required: 0,
+    created_at: staleAt,
+    delivered_at: null,
+    acked_at: null,
+  });
+
+  const fresh = await app.fetch(new Request(`${BASE}${path}`, { method: "POST", body: "new" }));
+  assert.equal(fresh.status, 202);
+
+  const inbox = await callTool(app, agent.hub_token, "list_my_inbox", {});
+  const bodies = inbox.items.map((item) => item.payload?.body);
+  assert.ok(bodies.includes("new"));
+  assert.ok(!bodies.includes("old"), "stale endpoint backlog must be dropped");
+});
+
 async function registerUser(app, username, { namespace, password } = {}) {
   const response = await app.fetch(
     new Request(`${BASE}/auth/register`, {

@@ -71,9 +71,15 @@ impl HubAgentSummary {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct HubInboxItem {
+    #[serde(default)]
+    #[allow(dead_code)] // staged: consumed by Tasks 10-12
+    pub notification_id: Option<String>,
     pub sender: String,
     pub summary: String,
     pub payload_visibility: String,
+    #[serde(default)]
+    #[allow(dead_code)] // staged: consumed by Tasks 10-12
+    pub payload: Option<serde_json::Value>,
     pub first_contact_required: bool,
     pub status: String,
     pub created_at: String,
@@ -83,6 +89,15 @@ pub struct HubInboxItem {
 pub struct HubSendReceipt {
     pub status: String,
     pub first_contact_required: bool,
+}
+
+#[allow(dead_code)] // staged: consumed by Tasks 10-12
+#[derive(Debug, Clone, Deserialize)]
+pub struct HubEndpointReceipt {
+    pub endpoint_id: String,
+    pub url: String,
+    pub label: String,
+    pub mode: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -189,6 +204,51 @@ impl HubClient {
                 "list_my_inbox",
                 json!({ "limit": clamp_display_limit(limit) }),
             )
+            .await?;
+        Ok(page.items)
+    }
+
+    #[allow(dead_code)] // staged: consumed by Tasks 10-12
+    pub async fn register_endpoint(&self, label: &str, mode: &str) -> Result<HubEndpointReceipt> {
+        self.call_json("register_endpoint", json!({ "label": label, "mode": mode }))
+            .await
+    }
+
+    #[allow(dead_code)] // staged: consumed by Tasks 10-12
+    pub async fn revoke_endpoint(&self, endpoint_id: &str) -> Result<()> {
+        #[derive(Deserialize)]
+        struct Response {
+            #[allow(dead_code)]
+            revoked: bool,
+        }
+        let _: Response = self
+            .call_json("revoke_endpoint", json!({ "endpoint_id": endpoint_id }))
+            .await?;
+        Ok(())
+    }
+
+    #[allow(dead_code)] // staged: consumed by Tasks 10-12
+    pub async fn ack_notifications(&self, notification_ids: &[String]) -> Result<()> {
+        #[derive(Deserialize)]
+        struct Response {
+            #[allow(dead_code)]
+            acked_notification_ids: Vec<String>,
+        }
+        let _: Response = self
+            .call_json(
+                "ack_notification",
+                json!({ "notification_ids": notification_ids }),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Inbox page for backlog replay. Unlike `list_inbox` (display-clamped to 10), this
+    /// uses the hub's real page cap.
+    #[allow(dead_code)] // staged: consumed by Tasks 10-12
+    pub async fn list_inbox_backlog(&self, limit: usize) -> Result<Vec<HubInboxItem>> {
+        let page: Page<HubInboxItem> = self
+            .call_json("list_my_inbox", json!({ "limit": limit.clamp(1, 100) }))
             .await?;
         Ok(page.items)
     }

@@ -422,6 +422,9 @@ async fn run_repl(mut cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo)
     let cron_registry = triggers::global_cron_registry().clone();
     let cron_path = session::cron_sidecar_path_for_session(&session, &repo).await?;
     let cron_load_error = cron_registry.load_from_path(cron_path).err();
+    let endpoint_registry = triggers::global_endpoint_registry().clone();
+    let endpoint_path = session::endpoint_sidecar_path_for_session(&session, &repo).await?;
+    let endpoint_load_error = endpoint_registry.load_from_path(endpoint_path).err();
     let memory_dir = config::memory_dir();
     let mut tools = tools::default_tools(memory_dir.clone());
     // Task delegation tool (issue #11). Shares the parent's model + stream backend so its
@@ -611,12 +614,32 @@ async fn run_repl(mut cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo)
     // the sub-agent and inject their pushed summary into chat (the latter also runs one
     // model turn in the parent context); everything else falls through to the dynamic-rule
     // hook. The match is structural (server name), no model.
+    // Endpoint messages ack back to the hub the moment this session accepts them, so the
+    // backlog stops replaying them on the next reconnect. Fire-and-forget: a failed ack
+    // just means one redundant replay later.
+    let endpoint_acker: triggers::EndpointAcker = std::sync::Arc::new(|notification_id: String| {
+        tokio::spawn(async move {
+            match hub_client::HubClient::connect_default().await {
+                Ok(client) => {
+                    if let Err(e) = client.ack_notifications(&[notification_id]).await {
+                        tracing::warn!("endpoint ack failed: {e}");
+                    }
+                    client.close().await;
+                }
+                Err(e) => tracing::warn!("endpoint ack skipped: {e}"),
+            }
+        });
+    });
     opts.before_trigger_action = Some(triggers::cron_action_hook(
         cron_registry.clone(),
-        triggers::direct_inject_action_hook(
-            mcp_inject_summary_servers,
-            mcp_inject_and_run_servers,
-            triggers::before_trigger_action_hook(dynamic_trigger_registry.clone()),
+        triggers::endpoint_action_hook(
+            endpoint_registry.clone(),
+            endpoint_acker,
+            triggers::direct_inject_action_hook(
+                mcp_inject_summary_servers,
+                mcp_inject_and_run_servers,
+                triggers::before_trigger_action_hook(dynamic_trigger_registry.clone()),
+            ),
         ),
     ));
     // LSP feedback loop (issue #12): attach diagnostics to write/edit tool results when
@@ -664,6 +687,14 @@ async fn run_repl(mut cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo)
     harness.register_notification_hook(std::sync::Arc::new(
         triggers::DynamicTriggerCheckHook::new(dynamic_trigger_registry.clone()),
     ));
+    // One-shot endpoint backlog replay: messages POSTed while this session was offline
+    // are pulled from the hub inbox and re-injected via the live mapping path. No-op
+    // when this session has no endpoint bindings or no hub credential.
+    if !endpoint_registry.list().is_empty() {
+        harness.register_notification_hook(std::sync::Arc::new(
+            triggers::EndpointBacklogHook::new(endpoint_registry.clone()),
+        ));
+    }
 
     // Resume hydration (if --resume) — the rebuilt transcript is replayed into the feed below.
     let replay_context = if resumed {
@@ -784,6 +815,19 @@ async fn run_repl(mut cli: Cli, cwd: std::path::PathBuf, repo: JsonlSessionRepo)
         app.system_line(format!(
             "loaded {} cron job(s) from {}",
             cron_registry.list().len(),
+            location
+        ));
+    }
+    if let Some(err) = &endpoint_load_error {
+        app.error_line(format!("endpoints: {err}"));
+    } else if !endpoint_registry.list().is_empty() {
+        let location = endpoint_registry
+            .storage_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "memory".into());
+        app.system_line(format!(
+            "loaded {} endpoint binding(s) from {}",
+            endpoint_registry.list().len(),
             location
         ));
     }

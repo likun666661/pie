@@ -56,7 +56,6 @@ pub fn endpoint_sidecar_path(session_path: &std::path::Path) -> PathBuf {
 }
 
 /// Return the endpoint-binding sidecar for a live session.
-#[allow(dead_code)] // wired into main.rs in Task 12
 pub async fn endpoint_sidecar_path_for_session(
     session: &Session,
     repo: &JsonlSessionRepo,

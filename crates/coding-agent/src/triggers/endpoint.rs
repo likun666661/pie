@@ -6,9 +6,6 @@
 //! into a runtime `Trigger` (and acks it). Foreign frames are ignored so they stay in
 //! the hub backlog for the owning session.
 
-// Public API consumed by later tasks (trigger mapping / action-hook wiring).
-#![allow(dead_code)]
-
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

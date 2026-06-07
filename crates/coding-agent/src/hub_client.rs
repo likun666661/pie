@@ -224,7 +224,6 @@ impl HubClient {
         Ok(())
     }
 
-    #[allow(dead_code)] // staged: consumed by Tasks 10-12
     pub async fn ack_notifications(&self, notification_ids: &[String]) -> Result<()> {
         #[derive(Deserialize)]
         struct Response {

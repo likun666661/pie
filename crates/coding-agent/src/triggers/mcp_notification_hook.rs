@@ -180,6 +180,17 @@ impl NotificationHook for McpNotificationHook {
 /// Pure function so the test suite can pin every row of the §4.2.3 table without spinning
 /// up a real `McpClient`.
 fn map_notification(server_name: &str, n: &McpServerNotification) -> Option<Trigger> {
+    // Endpoint pushes are first-class hub frames with their own ownership gate,
+    // summary rule, and Shared payload — handled apart from the custom-notification
+    // privacy path (RFC 1 §4.2.3) on purpose.
+    if n.method == "notifications/endpoint_message" {
+        return crate::triggers::endpoint::map_endpoint_message(
+            server_name,
+            &n.params,
+            crate::triggers::endpoint::global_endpoint_registry(),
+        );
+    }
+
     let (idempotency_key, replacement_policy) = idempotency_for(server_name, &n.method, &n.params)?;
     let payload_summary = render_summary(&n.method, &n.params);
     let payload = first_contact_prompt_payload(&n.method, &n.params);
@@ -283,7 +294,7 @@ fn safe_mention(value: &str) -> Option<String> {
     parse_safe_mention(&safe)
 }
 
-fn safe_display(value: &str, cap: usize) -> String {
+pub(crate) fn safe_display(value: &str, cap: usize) -> String {
     let redacted = redact_notification_text(value).replace('\n', " ");
     truncate_chars(&redacted, cap)
 }
@@ -316,6 +327,7 @@ fn redact_notification_text(value: &str) -> String {
             let lower = part.to_ascii_lowercase();
             if lower.starts_with("hub_agent_")
                 || lower.starts_with("hub_hs_")
+                || lower.starts_with("hub_ep_")
                 || lower.starts_with("sk-")
                 || lower.contains("bearer")
                 || lower.contains("token")
@@ -419,7 +431,7 @@ fn extract_dedup_key(params: &serde_json::Value) -> Option<String> {
         .map(|s| s.to_string())
 }
 
-fn safe_idempotency_segment(value: &str) -> String {
+pub(crate) fn safe_idempotency_segment(value: &str) -> String {
     let redacted = redact_notification_text(value);
     let has_sensitive_text = redacted != value;
     let is_unbounded = value.chars().count() > 200;

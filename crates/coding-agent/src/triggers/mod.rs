@@ -27,6 +27,8 @@ pub use dynamic::{
     fire_once_harness_listener, global_registry,
 };
 #[allow(unused_imports)]
-pub use endpoint::{EndpointBinding, EndpointMode, EndpointRegistry, global_endpoint_registry};
+pub use endpoint::{
+    EndpointBinding, EndpointMode, EndpointRegistry, global_endpoint_registry, map_endpoint_message,
+};
 #[allow(unused_imports)]
 pub use mcp_notification_hook::McpNotificationHook;

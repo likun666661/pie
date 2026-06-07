@@ -16,6 +16,10 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use once_cell::sync::OnceCell;
 use parking_lot::Mutex;
+use pie_agent_core::{
+    CredentialScope, PayloadVisibility, ReplacementPolicy, SourceKind, Trigger, TriggerAuthority,
+    TriggerSource,
+};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -156,6 +160,74 @@ pub fn global_endpoint_registry() -> &'static EndpointRegistry {
     CELL.get_or_init(EndpointRegistry::new)
 }
 
+/// Map one `notifications/endpoint_message` params object to a runtime `Trigger`,
+/// gated on session ownership. Returns `None` for frames whose `endpoint_id` is not
+/// bound to this session (another pie process owns them — leave the hub backlog row
+/// for it) and for malformed frames.
+///
+/// First-class hub frame: unlike generic custom notifications, the body is *meant*
+/// for the agent, so it travels verbatim in the `Shared` payload. The persisted audit
+/// summary stays bounded + redacted like every other summary.
+pub fn map_endpoint_message(
+    server_name: &str,
+    params: &serde_json::Value,
+    registry: &EndpointRegistry,
+) -> Option<Trigger> {
+    use super::mcp_notification_hook::{safe_display, safe_idempotency_segment};
+
+    let endpoint_id = params.get("endpoint_id")?.as_str()?;
+    let binding = registry.owns(endpoint_id)?;
+    let notification_id = params.get("notification_id")?.as_str()?;
+    let body = params.get("body").and_then(|v| v.as_str()).unwrap_or("");
+    let content_type = params
+        .get("content_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("application/octet-stream");
+    let received_at = params
+        .get("received_at")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    Some(Trigger {
+        source: TriggerSource::Mcp {
+            server_name: server_name.to_string(),
+            method: "notifications/endpoint_message".to_string(),
+        },
+        source_kind: SourceKind::Mcp,
+        source_label: format!("mcp:{server_name}"),
+        event_label: format!("endpoint {}", binding.label),
+        payload_visibility: PayloadVisibility::Shared,
+        payload_summary: Some(format!(
+            "endpoint {}: {}",
+            binding.label,
+            safe_display(body, 200)
+        )),
+        payload: Some(serde_json::json!({
+            "endpoint_id": endpoint_id,
+            "notification_id": notification_id,
+            "label": binding.label,
+            "mode": binding.mode.as_str(),
+            "content_type": content_type,
+            "body": body,
+            "received_at": received_at,
+        })),
+        idempotency_key: format!(
+            "mcp:{server_name}:endpoint:{}",
+            safe_idempotency_segment(notification_id)
+        ),
+        replacement_policy: ReplacementPolicy::Drop,
+        trace_id: Uuid::new_v4().to_string(),
+        authority: TriggerAuthority {
+            principal_id: format!("mcp:{server_name}:endpoint:{endpoint_id}"),
+            principal_label: format!("endpoint {}", binding.label),
+            credential_scope: CredentialScope::User,
+            allowed_source_actions: Vec::new(),
+            expires_at: None,
+        },
+        received_at: Utc::now(),
+    })
+}
+
 fn read_bindings_file(path: &Path) -> Result<Vec<EndpointBinding>, EndpointStorageError> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
@@ -196,6 +268,8 @@ fn write_bindings_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pie_agent_core::{PayloadVisibility, ReplacementPolicy, SourceKind, TriggerSource};
+    use serde_json::json;
 
     pub(crate) fn binding(endpoint_id: &str, mode: EndpointMode) -> EndpointBinding {
         EndpointBinding {
@@ -273,5 +347,122 @@ mod tests {
         );
         assert_eq!(EndpointMode::parse("summary"), Some(EndpointMode::Summary));
         assert_eq!(EndpointMode::parse("shout"), None);
+    }
+
+    fn endpoint_params(endpoint_id: &str, body: &str) -> serde_json::Value {
+        json!({
+            "notification_id": "11111111-1111-4111-8111-111111111111",
+            "endpoint_id": endpoint_id,
+            "label": "wire-label-ignored",
+            "mode": "summary",
+            "content_type": "application/json",
+            "body": body,
+            "received_at": "2026-06-07T00:00:00Z",
+            "_meta": { "pie_dedup_key": "11111111-1111-4111-8111-111111111111" }
+        })
+    }
+
+    #[test]
+    fn owned_endpoint_message_maps_to_shared_trigger() {
+        let registry = EndpointRegistry::new();
+        registry
+            .add_binding(binding("ep-1", EndpointMode::Run))
+            .expect("add");
+
+        let trigger = map_endpoint_message(
+            "pie-hub",
+            &endpoint_params("ep-1", "{\"build\":42}"),
+            &registry,
+        )
+        .expect("owned message maps");
+
+        assert!(matches!(
+            trigger.source,
+            TriggerSource::Mcp { ref server_name, ref method }
+                if server_name == "pie-hub" && method == "notifications/endpoint_message"
+        ));
+        assert_eq!(trigger.source_kind, SourceKind::Mcp);
+        assert_eq!(trigger.payload_visibility, PayloadVisibility::Shared);
+        assert_eq!(trigger.replacement_policy, ReplacementPolicy::Drop);
+        assert_eq!(
+            trigger.idempotency_key,
+            "mcp:pie-hub:endpoint:11111111-1111-4111-8111-111111111111"
+        );
+        let payload = trigger.payload.expect("shared payload");
+        assert_eq!(
+            payload.get("body").and_then(|v| v.as_str()),
+            Some("{\"build\":42}")
+        );
+        // Display fields come from the LOCAL binding, not the wire frame.
+        assert_eq!(payload.get("label").and_then(|v| v.as_str()), Some("ci"));
+        assert_eq!(payload.get("mode").and_then(|v| v.as_str()), Some("run"));
+        let summary = trigger.payload_summary.expect("summary");
+        assert!(summary.contains("endpoint ci"), "{summary}");
+    }
+
+    #[test]
+    fn foreign_endpoint_message_is_ignored() {
+        let registry = EndpointRegistry::new();
+        registry
+            .add_binding(binding("ep-1", EndpointMode::Run))
+            .expect("add");
+        assert!(
+            map_endpoint_message("pie-hub", &endpoint_params("ep-other", "x"), &registry).is_none(),
+            "foreign endpoint_id must not produce a trigger"
+        );
+    }
+
+    #[test]
+    fn endpoint_summary_is_redacted_but_payload_body_is_verbatim() {
+        let registry = EndpointRegistry::new();
+        registry
+            .add_binding(binding("ep-1", EndpointMode::Run))
+            .expect("add");
+        let body = "deploy hub_agent_secret_should_not_persist now";
+        let trigger = map_endpoint_message("pie-hub", &endpoint_params("ep-1", body), &registry)
+            .expect("maps");
+        let summary = trigger.payload_summary.unwrap();
+        assert!(
+            !summary.contains("hub_agent_secret_should_not_persist"),
+            "audit summary must redact token-like text: {summary}"
+        );
+        // The Shared payload carries the verbatim body for the agent prompt.
+        assert_eq!(
+            trigger
+                .payload
+                .unwrap()
+                .get("body")
+                .and_then(|v| v.as_str()),
+            Some(body)
+        );
+    }
+
+    #[test]
+    fn endpoint_url_token_is_redacted_from_summary() {
+        let registry = EndpointRegistry::new();
+        registry
+            .add_binding(binding("ep-1", EndpointMode::Run))
+            .expect("add");
+        let body = "echo hub_ep_abcdef0123456789abcdef0123456789 back";
+        let trigger = map_endpoint_message("pie-hub", &endpoint_params("ep-1", body), &registry)
+            .expect("maps");
+        let summary = trigger.payload_summary.unwrap();
+        assert!(
+            !summary.contains("hub_ep_abcdef"),
+            "capability tokens must not leak into the audit summary: {summary}"
+        );
+    }
+
+    #[test]
+    fn endpoint_message_without_required_fields_is_ignored() {
+        let registry = EndpointRegistry::new();
+        registry
+            .add_binding(binding("ep-1", EndpointMode::Run))
+            .expect("add");
+        assert!(map_endpoint_message("pie-hub", &json!({}), &registry).is_none());
+        assert!(
+            map_endpoint_message("pie-hub", &json!({ "endpoint_id": "ep-1" }), &registry).is_none(),
+            "missing notification_id must not map"
+        );
     }
 }

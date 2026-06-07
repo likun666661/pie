@@ -28,7 +28,8 @@ pub use dynamic::{
 };
 #[allow(unused_imports)]
 pub use endpoint::{
-    EndpointBinding, EndpointMode, EndpointRegistry, global_endpoint_registry, map_endpoint_message,
+    EndpointAcker, EndpointBinding, EndpointMode, EndpointRegistry, endpoint_action_hook,
+    global_endpoint_registry, map_endpoint_message,
 };
 #[allow(unused_imports)]
 pub use mcp_notification_hook::McpNotificationHook;

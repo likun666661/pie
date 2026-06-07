@@ -17,10 +17,12 @@ use chrono::{DateTime, Utc};
 use once_cell::sync::OnceCell;
 use parking_lot::Mutex;
 use pie_agent_core::{
-    CredentialScope, PayloadVisibility, ReplacementPolicy, SourceKind, Trigger, TriggerAuthority,
-    TriggerSource,
+    BeforeTriggerActionContext, BeforeTriggerActionHook, CredentialScope, PayloadVisibility,
+    PromoteAction, ReplacementPolicy, SourceKind, Trigger, TriggerAction, TriggerAuthority,
+    TriggerDelivery, TriggerSource,
 };
 use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -158,6 +160,91 @@ impl EndpointRegistry {
 pub fn global_endpoint_registry() -> &'static EndpointRegistry {
     static CELL: OnceCell<EndpointRegistry> = OnceCell::new();
     CELL.get_or_init(EndpointRegistry::new)
+}
+
+/// Acknowledge an endpoint notification back to the hub. Injected as a closure so the
+/// hook stays unit-testable without a network; `main.rs` passes a closure that spawns a
+/// `HubClient::ack_notifications` call.
+pub type EndpointAcker = Arc<dyn Fn(String) + Send + Sync>;
+
+/// Route endpoint-message triggers by their per-endpoint mode, bypassing the server-level
+/// `inject_summary` / `inject_and_run` classification in `direct_inject_action_hook`.
+/// Everything else falls through to `inner`. Acks fire here — the moment the owning
+/// session accepts the message — so the hub backlog stops replaying it.
+pub fn endpoint_action_hook(
+    registry: EndpointRegistry,
+    acker: EndpointAcker,
+    inner: BeforeTriggerActionHook,
+) -> BeforeTriggerActionHook {
+    Arc::new(
+        move |ctx: BeforeTriggerActionContext, cancel: CancellationToken| {
+            let is_endpoint = matches!(
+                &ctx.trigger.source,
+                TriggerSource::Mcp { server_name, method }
+                    if server_name == crate::config::HUB_SERVER_NAME
+                        && method == "notifications/endpoint_message"
+            );
+            if !is_endpoint {
+                return inner(ctx, cancel);
+            }
+            let payload = ctx
+                .trigger
+                .payload
+                .clone()
+                .unwrap_or(serde_json::Value::Null);
+            let endpoint_id = payload
+                .get("endpoint_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let Some(binding) = registry.owns(endpoint_id) else {
+                // The adapter already ownership-gated; defensive fall-through only.
+                return inner(ctx, cancel);
+            };
+            if let Some(notification_id) = payload.get("notification_id").and_then(|v| v.as_str()) {
+                acker(notification_id.to_string());
+            }
+            let body = payload
+                .get("body")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let received_at = payload
+                .get("received_at")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let label = binding.label.clone();
+            match binding.mode {
+                EndpointMode::Run => Box::pin(async move {
+                    TriggerAction {
+                        prompt: format!(
+                            "[endpoint {label}] message received at {received_at}:\n\n{body}"
+                        ),
+                        promote: PromoteAction::None,
+                        promote_requires_approval: false,
+                        delivery: TriggerDelivery::InjectAndRun,
+                    }
+                }),
+                EndpointMode::Summary => {
+                    let has_summary = ctx.trigger.payload_summary.is_some();
+                    Box::pin(async move {
+                        TriggerAction {
+                            prompt: String::new(),
+                            promote: if has_summary {
+                                PromoteAction::PromoteSummaryNow {
+                                    template_body: Some("{{trigger.payload_summary}}".to_string()),
+                                }
+                            } else {
+                                PromoteAction::None
+                            },
+                            promote_requires_approval: false,
+                            delivery: TriggerDelivery::InjectSummary,
+                        }
+                    })
+                }
+            }
+        },
+    )
 }
 
 /// Map one `notifications/endpoint_message` params object to a runtime `Trigger`,
@@ -464,5 +551,118 @@ mod tests {
             map_endpoint_message("pie-hub", &json!({ "endpoint_id": "ep-1" }), &registry).is_none(),
             "missing notification_id must not map"
         );
+    }
+
+    use pie_agent_core::{
+        BeforeTriggerActionContext, PromoteAction, TriggerDelivery, TriggerRuntimeSnapshot,
+    };
+    use tokio_util::sync::CancellationToken;
+
+    fn endpoint_ctx(
+        registry: &EndpointRegistry,
+        endpoint_id: &str,
+        body: &str,
+    ) -> BeforeTriggerActionContext {
+        let trigger = map_endpoint_message(
+            crate::config::HUB_SERVER_NAME,
+            &endpoint_params(endpoint_id, body),
+            registry,
+        )
+        .expect("trigger maps");
+        BeforeTriggerActionContext {
+            trigger,
+            runtime: TriggerRuntimeSnapshot {
+                dedup_entries: 0,
+                active_traces: 0,
+                accepted_total: 0,
+                deduped_total: 0,
+                cycle_suppressed_total: 0,
+            },
+        }
+    }
+
+    fn recording_acker() -> (EndpointAcker, Arc<Mutex<Vec<String>>>) {
+        let acked = Arc::new(Mutex::new(Vec::<String>::new()));
+        let sink = acked.clone();
+        let acker: EndpointAcker = Arc::new(move |id: String| {
+            sink.lock().push(id);
+        });
+        (acker, acked)
+    }
+
+    fn fallthrough_inner() -> pie_agent_core::BeforeTriggerActionHook {
+        Arc::new(
+            |ctx: BeforeTriggerActionContext, _cancel: CancellationToken| {
+                Box::pin(async move { pie_agent_core::TriggerAction::default_for(&ctx.trigger) })
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn run_mode_injects_body_and_acks() {
+        let registry = EndpointRegistry::new();
+        registry
+            .add_binding(binding("ep-1", EndpointMode::Run))
+            .expect("add");
+        let (acker, acked) = recording_acker();
+        let hook = endpoint_action_hook(registry.clone(), acker, fallthrough_inner());
+
+        let action = hook(
+            endpoint_ctx(&registry, "ep-1", "deploy now"),
+            CancellationToken::new(),
+        )
+        .await;
+
+        assert!(matches!(action.delivery, TriggerDelivery::InjectAndRun));
+        assert!(action.prompt.contains("deploy now"), "{}", action.prompt);
+        assert!(action.prompt.contains("endpoint ci"), "{}", action.prompt);
+        assert_eq!(
+            acked.lock().clone(),
+            vec!["11111111-1111-4111-8111-111111111111".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn summary_mode_promotes_summary_without_model_turn() {
+        let registry = EndpointRegistry::new();
+        registry
+            .add_binding(binding("ep-1", EndpointMode::Summary))
+            .expect("add");
+        let (acker, acked) = recording_acker();
+        let hook = endpoint_action_hook(registry.clone(), acker, fallthrough_inner());
+
+        let action = hook(
+            endpoint_ctx(&registry, "ep-1", "fyi"),
+            CancellationToken::new(),
+        )
+        .await;
+
+        assert!(matches!(action.delivery, TriggerDelivery::InjectSummary));
+        assert!(matches!(
+            action.promote,
+            PromoteAction::PromoteSummaryNow { .. }
+        ));
+        assert_eq!(acked.lock().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn non_endpoint_triggers_fall_through_without_ack() {
+        let registry = EndpointRegistry::new();
+        let (acker, acked) = recording_acker();
+        let hook = endpoint_action_hook(registry, acker, fallthrough_inner());
+
+        // A plain hub agent_message trigger — must reach the inner hook untouched.
+        let other_registry = EndpointRegistry::new();
+        other_registry
+            .add_binding(binding("ep-1", EndpointMode::Run))
+            .expect("add");
+        let mut ctx = endpoint_ctx(&other_registry, "ep-1", "x");
+        if let TriggerSource::Mcp { method, .. } = &mut ctx.trigger.source {
+            *method = "notifications/agent_message".to_string();
+        }
+
+        let action = hook(ctx, CancellationToken::new()).await;
+        assert!(matches!(action.delivery, TriggerDelivery::SubAgent));
+        assert!(acked.lock().is_empty());
     }
 }

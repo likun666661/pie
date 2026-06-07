@@ -89,12 +89,13 @@ pub struct HubSendReceipt {
     pub first_contact_required: bool,
 }
 
-#[allow(dead_code)] // staged: consumed by Tasks 10-12
 #[derive(Debug, Clone, Deserialize)]
 pub struct HubEndpointReceipt {
     pub endpoint_id: String,
     pub url: String,
     pub label: String,
+    // returned by the hub wire format; consumed when constructing EndpointBinding
+    #[allow(dead_code)]
     pub mode: String,
 }
 
@@ -206,13 +207,11 @@ impl HubClient {
         Ok(page.items)
     }
 
-    #[allow(dead_code)] // staged: consumed by Tasks 10-12
     pub async fn register_endpoint(&self, label: &str, mode: &str) -> Result<HubEndpointReceipt> {
         self.call_json("register_endpoint", json!({ "label": label, "mode": mode }))
             .await
     }
 
-    #[allow(dead_code)] // staged: consumed by Tasks 10-12
     pub async fn revoke_endpoint(&self, endpoint_id: &str) -> Result<()> {
         #[derive(Deserialize)]
         struct Response {

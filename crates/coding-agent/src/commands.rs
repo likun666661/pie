@@ -229,6 +229,7 @@ impl Registry {
         r.register(Arc::new(GoalCommand));
         r.register(Arc::new(GoalStartCommand));
         r.register(Arc::new(HubCommand));
+        r.register(Arc::new(EndpointCommand));
         r.register(Arc::new(ConfigCommand));
         r.register(Arc::new(TriggersCommand));
         r.register(Arc::new(NewTriggerCommand));
@@ -1625,6 +1626,178 @@ fn hub_logout() -> CommandOutcome {
     cprintln!("run /hub join to store a new hub credential");
     CommandOutcome::Handled
 }
+
+// ─── /endpoint ──────────────────────────────────────────────────────────────
+
+struct EndpointCommand;
+
+#[async_trait]
+impl SlashCommand for EndpointCommand {
+    fn name(&self) -> &'static str {
+        "endpoint"
+    }
+
+    fn description(&self) -> &'static str {
+        "register this session as a public hub webhook endpoint"
+    }
+
+    fn usage(&self) -> &'static str {
+        "[list|register [label] [--mode run|summary]|revoke <endpoint-id>]"
+    }
+
+    async fn run(&self, argv: &[String], _ctx: &CommandCtx<'_>) -> CommandOutcome {
+        match argv.first().map(String::as_str) {
+            None | Some("list") => endpoint_list(),
+            Some("register") => endpoint_register(&argv[1..]).await,
+            Some("revoke") => endpoint_revoke(&argv[1..]).await,
+            Some(_) => CommandOutcome::Error(
+                "usage: /endpoint [list|register [label] [--mode run|summary]|revoke <endpoint-id>]"
+                    .into(),
+            ),
+        }
+    }
+}
+
+fn endpoint_list() -> CommandOutcome {
+    let bindings = crate::triggers::global_endpoint_registry().list();
+    if bindings.is_empty() {
+        cprintln!("no endpoints registered for this session; run /endpoint register");
+        return CommandOutcome::Handled;
+    }
+    for binding in bindings {
+        cprintln!(
+            "{} [{}] {} {}",
+            binding.endpoint_id,
+            binding.mode.as_str(),
+            binding.label,
+            binding.url
+        );
+    }
+    CommandOutcome::Handled
+}
+
+pub(crate) struct EndpointRegisterArgs {
+    pub(crate) label: String,
+    pub(crate) mode: crate::triggers::EndpointMode,
+}
+
+pub(crate) fn parse_endpoint_register_args(
+    args: &[String],
+) -> Result<EndpointRegisterArgs, String> {
+    let mut label: Option<String> = None;
+    let mut mode = crate::triggers::EndpointMode::Run;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--mode" => {
+                let Some(value) = args.get(i + 1) else {
+                    return Err("usage: /endpoint register [label] [--mode run|summary]".into());
+                };
+                mode = crate::triggers::EndpointMode::parse(value)
+                    .ok_or_else(|| format!("unknown mode `{value}`; use run or summary"))?;
+                i += 2;
+            }
+            other if label.is_none() && !other.starts_with("--") => {
+                label = Some(other.to_string());
+                i += 1;
+            }
+            other => return Err(format!("unexpected argument `{other}`")),
+        }
+    }
+    Ok(EndpointRegisterArgs {
+        label: label.unwrap_or_else(|| "default".into()),
+        mode,
+    })
+}
+
+async fn endpoint_register(args: &[String]) -> CommandOutcome {
+    let parsed = match parse_endpoint_register_args(args) {
+        Ok(parsed) => parsed,
+        Err(e) => return CommandOutcome::Error(e),
+    };
+    let client = match crate::hub_client::HubClient::connect_default().await {
+        Ok(client) => client,
+        Err(e) => {
+            return CommandOutcome::Error(format!(
+                "hub connection failed: {e}; run /hub join first"
+            ));
+        }
+    };
+    let receipt = match client
+        .register_endpoint(&parsed.label, parsed.mode.as_str())
+        .await
+    {
+        Ok(receipt) => receipt,
+        Err(e) => {
+            client.close().await;
+            return CommandOutcome::Error(format!("register endpoint failed: {e}"));
+        }
+    };
+    client.close().await;
+    let binding = crate::triggers::EndpointBinding {
+        endpoint_id: receipt.endpoint_id.clone(),
+        label: receipt.label.clone(),
+        mode: parsed.mode,
+        url: receipt.url.clone(),
+        created_at: chrono::Utc::now(),
+    };
+    if let Err(e) = crate::triggers::global_endpoint_registry().add_binding(binding) {
+        return CommandOutcome::Error(format!(
+            "endpoint registered on hub but the local binding failed to save: {e}; \
+             revoke it with /endpoint revoke {}",
+            receipt.endpoint_id
+        ));
+    }
+    cprintln!(
+        "endpoint registered: {} ({})",
+        receipt.endpoint_id,
+        receipt.label
+    );
+    cprintln!("public URL (anyone holding it can POST into this session):");
+    cprintln!("{}", receipt.url);
+    cprintln!(
+        "mode: {} — messages are {} this session",
+        parsed.mode.as_str(),
+        match parsed.mode {
+            crate::triggers::EndpointMode::Run => "injected and run by",
+            crate::triggers::EndpointMode::Summary => "injected as summaries into",
+        }
+    );
+    CommandOutcome::Handled
+}
+
+async fn endpoint_revoke(args: &[String]) -> CommandOutcome {
+    let Some(endpoint_id) = args.first() else {
+        return CommandOutcome::Error("usage: /endpoint revoke <endpoint-id>".into());
+    };
+    let client = match crate::hub_client::HubClient::connect_default().await {
+        Ok(client) => client,
+        Err(e) => {
+            return CommandOutcome::Error(format!(
+                "hub connection failed: {e}; run /hub join first"
+            ));
+        }
+    };
+    if let Err(e) = client.revoke_endpoint(endpoint_id).await {
+        client.close().await;
+        return CommandOutcome::Error(format!("revoke failed: {e}"));
+    }
+    client.close().await;
+    match crate::triggers::global_endpoint_registry().remove_binding(endpoint_id) {
+        Ok(Some(_)) => cprintln!("endpoint {endpoint_id} revoked and unbound from this session"),
+        Ok(None) => {
+            cprintln!("endpoint {endpoint_id} revoked on hub (it was not bound to this session)")
+        }
+        Err(e) => {
+            return CommandOutcome::Error(format!(
+                "revoked on hub but local binding removal failed: {e}"
+            ));
+        }
+    }
+    CommandOutcome::Handled
+}
+
+// ─── /endpoint end ──────────────────────────────────────────────────────────
 
 struct HubSendArgs {
     target: String,
@@ -4171,5 +4344,30 @@ mod tests {
         let err = parse_skill_source("user-secret-token").unwrap_err();
         assert!(err.contains("expected one of"), "{err}");
         assert!(!err.contains("user-secret-token"), "{err}");
+    }
+
+    #[test]
+    fn endpoint_register_args_parse_label_and_mode() {
+        use crate::triggers::EndpointMode;
+
+        let default = parse_endpoint_register_args(&[]).expect("defaults");
+        assert_eq!(default.label, "default");
+        assert_eq!(default.mode, EndpointMode::Run);
+
+        let labeled = parse_endpoint_register_args(&["github-hooks".into()]).expect("label only");
+        assert_eq!(labeled.label, "github-hooks");
+        assert_eq!(labeled.mode, EndpointMode::Run);
+
+        let full = parse_endpoint_register_args(&["ci".into(), "--mode".into(), "summary".into()])
+            .expect("label + mode");
+        assert_eq!(full.label, "ci");
+        assert_eq!(full.mode, EndpointMode::Summary);
+
+        assert!(parse_endpoint_register_args(&["--mode".into()]).is_err());
+        assert!(parse_endpoint_register_args(&["--mode".into(), "shout".into()]).is_err());
+        assert!(
+            parse_endpoint_register_args(&["a".into(), "b".into()]).is_err(),
+            "second positional arg must be rejected"
+        );
     }
 }

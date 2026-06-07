@@ -973,6 +973,87 @@ test("web chat redacts token-like recipient in successful send output", async ()
   assert.equal(namespaceNotifications[0].summary, "hello token-like namespace");
 });
 
+test("register_endpoint mints a capability URL once and lists/revokes without leaking it", async () => {
+  const app = createTestApp();
+  const alice = await registerUser(app, "epalice");
+  const agent = await callTool(app, alice.session_token, "register_agent", {
+    handle: "epagent",
+    display_name: "Endpoint Agent",
+    description: "Endpoint test agent",
+    capabilities: [],
+  });
+
+  const registered = await callTool(app, agent.hub_token, "register_endpoint", {
+    label: "github hooks",
+    mode: "summary",
+  });
+  assert.deepEqual(Object.keys(registered).sort(), ["endpoint_id", "label", "mode", "token_note", "url"]);
+  assert.match(registered.endpoint_id, /^[0-9a-f-]{36}$/);
+  assert.match(registered.url, /^https:\/\/hub\.test\/e\/hub_ep_/);
+  assert.equal(registered.label, "github hooks");
+  assert.equal(registered.mode, "summary");
+
+  // Defaults: label "default", mode "run".
+  const defaulted = await callTool(app, agent.hub_token, "register_endpoint", {});
+  assert.equal(defaulted.label, "default");
+  assert.equal(defaulted.mode, "run");
+
+  // list never returns the token or URL.
+  const listed = await callTool(app, agent.hub_token, "list_endpoints", {});
+  assert.equal(listed.endpoints.length, 2);
+  assert.doesNotMatch(JSON.stringify(listed), /hub_ep_/);
+  assert.deepEqual(Object.keys(listed.endpoints[0]).sort(), [
+    "created_at",
+    "endpoint_id",
+    "label",
+    "last_used_at",
+    "mode",
+    "revoked_at",
+  ]);
+
+  // revoke own endpoint works; revoking it again fails.
+  const revoked = await callTool(app, agent.hub_token, "revoke_endpoint", {
+    endpoint_id: registered.endpoint_id,
+  });
+  assert.equal(revoked.revoked, true);
+  const again = await rpc(app, agent.hub_token, "tools/call", {
+    name: "revoke_endpoint",
+    arguments: { endpoint_id: registered.endpoint_id },
+  });
+  assert.equal(again.error.data.name, "not_found");
+});
+
+test("register_endpoint rejects bad mode and another agent cannot revoke", async () => {
+  const app = createTestApp();
+  const alice = await registerUser(app, "epowner");
+  const owner = await callTool(app, alice.session_token, "register_agent", {
+    handle: "epowneragent",
+    display_name: "Owner",
+    description: "Owner agent",
+    capabilities: [],
+  });
+  const bob = await registerUser(app, "epthief");
+  const thief = await callTool(app, bob.session_token, "register_agent", {
+    handle: "epthiefagent",
+    display_name: "Thief",
+    description: "Thief agent",
+    capabilities: [],
+  });
+
+  const badMode = await rpc(app, owner.hub_token, "tools/call", {
+    name: "register_endpoint",
+    arguments: { mode: "shout" },
+  });
+  assert.equal(badMode.error.data.name, "schema_invalid");
+
+  const registered = await callTool(app, owner.hub_token, "register_endpoint", {});
+  const stolen = await rpc(app, thief.hub_token, "tools/call", {
+    name: "revoke_endpoint",
+    arguments: { endpoint_id: registered.endpoint_id },
+  });
+  assert.equal(stolen.error.data.name, "not_found");
+});
+
 async function registerUser(app, username, { namespace, password } = {}) {
   const response = await app.fetch(
     new Request(`${BASE}/auth/register`, {

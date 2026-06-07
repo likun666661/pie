@@ -1187,6 +1187,12 @@ export class HubApp {
         return this.blockSender(await this.authenticate(request, "agent"), args);
       case "unblock_sender":
         return this.unblockSender(await this.authenticate(request, "agent"), args);
+      case "register_endpoint":
+        return this.registerEndpoint(await this.authenticate(request, "agent"), args, new URL(request.url).origin);
+      case "list_endpoints":
+        return this.listEndpoints(await this.authenticate(request, "agent"), args);
+      case "revoke_endpoint":
+        return this.revokeEndpoint(await this.authenticate(request, "agent"), args);
       default:
         throw ERR.schemaInvalid([`unknown tool ${toolName}`]);
     }
@@ -2227,6 +2233,64 @@ ${chatStyle()}
     return { acked_notification_ids: await this.store.ackNotifications(principal.agent_id, ids, nowIso()) };
   }
 
+  private async registerEndpoint(principal: Principal, args: Record<string, unknown>, origin: string): Promise<unknown> {
+    assertAgent(principal);
+    requirePermission(principal, "notification:receive");
+    ensureOnly(args, ["label", "mode"]);
+    const label = validatePlainText(optionalString(args.label, "label") ?? "default", "label", ENDPOINT_LABEL_LIMIT_CHARS);
+    const mode = endpointModeValue(optionalString(args.mode, "mode") ?? "run");
+    const endpointId = crypto.randomUUID();
+    const token = `hub_ep_${randomSecret(32)}`;
+    await this.store.createEndpoint({
+      endpoint_id: endpointId,
+      owner_agent_id: principal.agent_id,
+      token_hash: await sha256Hex(token),
+      label,
+      mode,
+      created_at: nowIso(),
+      revoked_at: null,
+      last_used_at: null,
+      rl_window_start: null,
+      rl_count: 0,
+    });
+    return {
+      endpoint_id: endpointId,
+      url: `${origin}/e/${token}`,
+      label,
+      mode,
+      token_note: "Store this URL locally; the hub stores only a hash and will not show it again.",
+    };
+  }
+
+  private async listEndpoints(principal: Principal, args: Record<string, unknown>): Promise<unknown> {
+    assertAgent(principal);
+    requirePermission(principal, "notification:receive");
+    ensureOnly(args, []);
+    const endpoints = await this.store.listEndpoints(principal.agent_id);
+    return {
+      endpoints: endpoints.map((endpoint) => ({
+        endpoint_id: endpoint.endpoint_id,
+        label: endpoint.label,
+        mode: endpoint.mode,
+        created_at: endpoint.created_at,
+        revoked_at: endpoint.revoked_at,
+        last_used_at: endpoint.last_used_at,
+      })),
+    };
+  }
+
+  private async revokeEndpoint(principal: Principal, args: Record<string, unknown>): Promise<unknown> {
+    assertAgent(principal);
+    requirePermission(principal, "notification:receive");
+    ensureOnly(args, ["endpoint_id"]);
+    const endpointId = uuidField(args, "endpoint_id");
+    const revoked = await this.store.revokeEndpoint(endpointId, principal.agent_id, nowIso());
+    if (!revoked) {
+      throw ERR.notFound("No active endpoint with that id belongs to this agent.");
+    }
+    return { revoked: true };
+  }
+
   private async listTrust(principal: Principal, args: Record<string, unknown>): Promise<unknown> {
     assertAgent(principal);
     requirePermission(principal, "trust:list");
@@ -2447,6 +2511,14 @@ const TOOL_DEFINITIONS = [
   }),
   tool("unblock_sender", "Unblock a sender agent UUID.", {
     sender_agent_id: "Sender agent UUID.",
+  }),
+  tool("register_endpoint", "Mint a public webhook URL for this agent. Returns the capability URL once.", {
+    label: "Optional plain-text label, at most 64 characters.",
+    mode: "Delivery mode for the owning session: run (default) or summary.",
+  }),
+  tool("list_endpoints", "List this agent's webhook endpoints without token material.", {}),
+  tool("revoke_endpoint", "Revoke one of this agent's webhook endpoints immediately.", {
+    endpoint_id: "Endpoint UUID returned by register_endpoint.",
   }),
 ];
 
@@ -2759,6 +2831,11 @@ function inboxValue(value: string): Inbox {
 function payloadVisibilityValue(value: string): PayloadVisibility {
   if (value === "Local" || value === "Shared" || value === "Redacted") return value;
   throw ERR.schemaInvalid(["payload_visibility must be Local, Shared, or Redacted"]);
+}
+
+function endpointModeValue(value: string): EndpointMode {
+  if (value === "run" || value === "summary") return value;
+  throw ERR.schemaInvalid(["mode must be run or summary"]);
 }
 
 function limitValue(value: unknown): number {

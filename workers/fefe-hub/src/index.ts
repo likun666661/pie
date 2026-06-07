@@ -23,11 +23,16 @@ const AUTH_EXCHANGE_TTL_SECONDS = 5 * 60;
 const MANUAL_AUTH_CODE_CHARS = 8;
 const WEB_SESSION_COOKIE = "hub_session";
 const WEB_SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
+const ENDPOINT_BODY_LIMIT_BYTES = 64 * 1024;
+const ENDPOINT_RATE_LIMIT_PER_MINUTE = 120;
+const ENDPOINT_BACKLOG_TTL_DAYS = 7;
+const ENDPOINT_LABEL_LIMIT_CHARS = 64;
 
 type Discoverable = "public" | "namespace" | "none";
 type Inbox = "open" | "namespace" | "invited" | "closed";
 type PayloadVisibility = "Local" | "Shared" | "Redacted";
 type NotificationStatus = "pending" | "delivered" | "acked" | "dropped";
+type EndpointMode = "run" | "summary";
 
 interface Env {
   DB?: D1Database;
@@ -153,6 +158,19 @@ interface NotificationRecord {
   acked_at: string | null;
 }
 
+interface EndpointRecord {
+  endpoint_id: string;
+  owner_agent_id: string;
+  token_hash: string;
+  label: string;
+  mode: EndpointMode;
+  created_at: string;
+  revoked_at: string | null;
+  last_used_at: string | null;
+  rl_window_start: string | null;
+  rl_count: number;
+}
+
 type Principal =
   | {
       kind: "human";
@@ -202,6 +220,12 @@ interface Store {
   markNotificationDelivered(notificationId: string, deliveredAt: string): Promise<void>;
   listNotifications(receiverAgentId: string, limit: number, cursor: string | null): Promise<NotificationRecord[]>;
   ackNotifications(receiverAgentId: string, notificationIds: string[], ackedAt: string): Promise<string[]>;
+  createEndpoint(endpoint: EndpointRecord): Promise<void>;
+  getEndpointByTokenHash(tokenHash: string): Promise<EndpointRecord | null>;
+  listEndpoints(ownerAgentId: string): Promise<EndpointRecord[]>;
+  revokeEndpoint(endpointId: string, ownerAgentId: string, revokedAt: string): Promise<boolean>;
+  updateEndpointUsage(endpointId: string, windowStart: string, count: number, lastUsedAt: string): Promise<void>;
+  deleteExpiredEndpointNotifications(receiverAgentId: string, beforeIso: string): Promise<void>;
 }
 
 interface Mailbox {
@@ -591,6 +615,70 @@ class D1Store implements Store {
     }
     return acked;
   }
+
+  async createEndpoint(endpoint: EndpointRecord): Promise<void> {
+    await this.db
+      .prepare(
+        `INSERT INTO endpoints
+         (endpoint_id, owner_agent_id, token_hash, label, mode,
+          created_at, revoked_at, last_used_at, rl_window_start, rl_count)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        endpoint.endpoint_id,
+        endpoint.owner_agent_id,
+        endpoint.token_hash,
+        endpoint.label,
+        endpoint.mode,
+        endpoint.created_at,
+        endpoint.revoked_at,
+        endpoint.last_used_at,
+        endpoint.rl_window_start,
+        endpoint.rl_count,
+      )
+      .run();
+  }
+
+  getEndpointByTokenHash(tokenHash: string): Promise<EndpointRecord | null> {
+    return this.db.prepare("SELECT * FROM endpoints WHERE token_hash = ?").bind(tokenHash).first<EndpointRecord>();
+  }
+
+  async listEndpoints(ownerAgentId: string): Promise<EndpointRecord[]> {
+    const result = await this.db
+      .prepare("SELECT * FROM endpoints WHERE owner_agent_id = ? ORDER BY created_at")
+      .bind(ownerAgentId)
+      .all<EndpointRecord>();
+    return result.results ?? [];
+  }
+
+  async revokeEndpoint(endpointId: string, ownerAgentId: string, revokedAt: string): Promise<boolean> {
+    const result = await this.db
+      .prepare(
+        `UPDATE endpoints SET revoked_at = ?
+         WHERE endpoint_id = ? AND owner_agent_id = ? AND revoked_at IS NULL`,
+      )
+      .bind(revokedAt, endpointId, ownerAgentId)
+      .run();
+    return d1ChangedRows(result) === 1;
+  }
+
+  async updateEndpointUsage(endpointId: string, windowStart: string, count: number, lastUsedAt: string): Promise<void> {
+    await this.db
+      .prepare("UPDATE endpoints SET rl_window_start = ?, rl_count = ?, last_used_at = ? WHERE endpoint_id = ?")
+      .bind(windowStart, count, lastUsedAt, endpointId)
+      .run();
+  }
+
+  async deleteExpiredEndpointNotifications(receiverAgentId: string, beforeIso: string): Promise<void> {
+    await this.db
+      .prepare(
+        `DELETE FROM notifications
+         WHERE receiver_agent_id = ? AND sender_namespace = 'endpoint'
+           AND status IN ('pending', 'delivered') AND created_at < ?`,
+      )
+      .bind(receiverAgentId, beforeIso)
+      .run();
+  }
 }
 
 export class MemoryStore implements Store {
@@ -601,6 +689,7 @@ export class MemoryStore implements Store {
   private readonly trust = new Map<string, TrustGrantRecord>();
   private readonly blocks = new Map<string, BlockRecord>();
   private readonly notifications = new Map<string, NotificationRecord>();
+  private readonly endpoints = new Map<string, EndpointRecord>();
 
   async createUser(user: UserRecord): Promise<void> {
     if ([...this.users.values()].some((u) => u.username === user.username && u.namespace === user.namespace)) {
@@ -774,6 +863,49 @@ export class MemoryStore implements Store {
       }
     }
     return acked;
+  }
+
+  async createEndpoint(endpoint: EndpointRecord): Promise<void> {
+    this.endpoints.set(endpoint.endpoint_id, { ...endpoint });
+  }
+
+  async getEndpointByTokenHash(tokenHash: string): Promise<EndpointRecord | null> {
+    return [...this.endpoints.values()].find((e) => e.token_hash === tokenHash) ?? null;
+  }
+
+  async listEndpoints(ownerAgentId: string): Promise<EndpointRecord[]> {
+    return [...this.endpoints.values()]
+      .filter((e) => e.owner_agent_id === ownerAgentId)
+      .sort((a, b) => a.created_at.localeCompare(b.created_at));
+  }
+
+  async revokeEndpoint(endpointId: string, ownerAgentId: string, revokedAt: string): Promise<boolean> {
+    const endpoint = this.endpoints.get(endpointId);
+    if (!endpoint || endpoint.owner_agent_id !== ownerAgentId || endpoint.revoked_at) {
+      return false;
+    }
+    this.endpoints.set(endpointId, { ...endpoint, revoked_at: revokedAt });
+    return true;
+  }
+
+  async updateEndpointUsage(endpointId: string, windowStart: string, count: number, lastUsedAt: string): Promise<void> {
+    const endpoint = this.endpoints.get(endpointId);
+    if (endpoint) {
+      this.endpoints.set(endpointId, { ...endpoint, rl_window_start: windowStart, rl_count: count, last_used_at: lastUsedAt });
+    }
+  }
+
+  async deleteExpiredEndpointNotifications(receiverAgentId: string, beforeIso: string): Promise<void> {
+    for (const [id, n] of this.notifications.entries()) {
+      if (
+        n.receiver_agent_id === receiverAgentId &&
+        n.sender_namespace === "endpoint" &&
+        (n.status === "pending" || n.status === "delivered") &&
+        n.created_at < beforeIso
+      ) {
+        this.notifications.delete(id);
+      }
+    }
   }
 }
 

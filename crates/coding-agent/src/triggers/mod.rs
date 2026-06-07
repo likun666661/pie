@@ -12,6 +12,7 @@
 
 pub mod cron;
 pub mod dynamic;
+pub mod endpoint;
 pub mod mcp_notification_hook;
 
 #[allow(unused_imports)]
@@ -25,5 +26,7 @@ pub use dynamic::{
     SetTriggerStateTool, before_trigger_action_hook, direct_inject_action_hook,
     fire_once_harness_listener, global_registry,
 };
+#[allow(unused_imports)]
+pub use endpoint::{EndpointBinding, EndpointMode, EndpointRegistry, global_endpoint_registry};
 #[allow(unused_imports)]
 pub use mcp_notification_hook::McpNotificationHook;

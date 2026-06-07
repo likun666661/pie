@@ -2482,38 +2482,55 @@ function revokedNotification(agentId: string): NotificationRecord {
 }
 
 function toSseEvent(notification: NotificationRecord): string {
-  const data = {
-    jsonrpc: "2.0",
-    method: notification.sender_namespace === "system" ? "notifications/agent_revoked" : "notifications/agent_message",
-    params:
-      notification.sender_namespace === "system"
-        ? {
-            agent_id: notification.receiver_agent_id,
-            revoked_at: notification.created_at,
-            reason: "revoked",
-            _meta: {
-              pie_dedup_key: notification.notification_id,
-              pie_summary: notification.summary,
-            },
-          }
-        : {
-            notification_id: notification.notification_id,
-            agent_id: notification.sender_agent_id,
-            handle: notification.sender_handle,
-            namespace: notification.sender_namespace,
-            sender: `@${notification.sender_handle}@${notification.sender_namespace}`,
-            payload_visibility: notification.payload_visibility,
-            first_contact_required: notification.first_contact_required === 1,
-            payload: notification.payload_visibility === "Shared" ? safeJsonParse(notification.payload_json) : undefined,
-            _meta: {
-              pie_dedup_key: notification.notification_id,
-              pie_summary: notification.summary,
-              receiver_agent_id: notification.receiver_agent_id,
-              sender_agent_id: notification.sender_agent_id,
-              action_class: "notification",
-            },
-          },
-  };
+  let method: string;
+  let params: Record<string, unknown>;
+  if (notification.sender_namespace === "system") {
+    method = "notifications/agent_revoked";
+    params = {
+      agent_id: notification.receiver_agent_id,
+      revoked_at: notification.created_at,
+      reason: "revoked",
+      _meta: {
+        pie_dedup_key: notification.notification_id,
+        pie_summary: notification.summary,
+      },
+    };
+  } else if (notification.sender_namespace === "endpoint") {
+    const payload = safeJsonParse(notification.payload_json) as Record<string, unknown> | undefined;
+    method = "notifications/endpoint_message";
+    params = {
+      notification_id: notification.notification_id,
+      endpoint_id: payload?.endpoint_id,
+      label: payload?.label,
+      mode: payload?.mode,
+      content_type: payload?.content_type,
+      body: payload?.body,
+      received_at: payload?.received_at,
+      _meta: {
+        pie_dedup_key: notification.notification_id,
+      },
+    };
+  } else {
+    method = "notifications/agent_message";
+    params = {
+      notification_id: notification.notification_id,
+      agent_id: notification.sender_agent_id,
+      handle: notification.sender_handle,
+      namespace: notification.sender_namespace,
+      sender: `@${notification.sender_handle}@${notification.sender_namespace}`,
+      payload_visibility: notification.payload_visibility,
+      first_contact_required: notification.first_contact_required === 1,
+      payload: notification.payload_visibility === "Shared" ? safeJsonParse(notification.payload_json) : undefined,
+      _meta: {
+        pie_dedup_key: notification.notification_id,
+        pie_summary: notification.summary,
+        receiver_agent_id: notification.receiver_agent_id,
+        sender_agent_id: notification.sender_agent_id,
+        action_class: "notification",
+      },
+    };
+  }
+  const data = { jsonrpc: "2.0", method, params };
   return `id: ${notification.notification_id}\nevent: message\ndata: ${JSON.stringify(data)}\n\n`;
 }
 

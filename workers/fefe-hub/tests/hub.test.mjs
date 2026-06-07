@@ -1166,6 +1166,42 @@ test("endpoint POST lazily drops un-acked endpoint backlog older than 7 days", a
   assert.ok(!bodies.includes("old"), "stale endpoint backlog must be dropped");
 });
 
+test("endpoint POST pushes a live notifications/endpoint_message SSE frame", async () => {
+  const app = createTestApp();
+  const alice = await registerUser(app, "epsse");
+  const agent = await callTool(app, alice.session_token, "register_agent", {
+    handle: "epsseagent",
+    display_name: "SSE",
+    description: "endpoint sse test agent",
+    capabilities: [],
+  });
+  const registered = await callTool(app, agent.hub_token, "register_endpoint", { label: "sse" });
+  const path = new URL(registered.url).pathname;
+
+  const stream = await app.fetch(
+    new Request(`${BASE}/mcp`, {
+      headers: { authorization: `Bearer ${agent.hub_token}`, accept: "text/event-stream" },
+    }),
+  );
+  assert.equal(stream.status, 200);
+  const reader = stream.body.getReader();
+
+  const accepted = await app.fetch(new Request(`${BASE}${path}`, { method: "POST", body: "hello agent" }));
+  assert.equal(accepted.status, 202);
+  const receipt = await accepted.json();
+
+  const chunk = await withTimeout(readChunk(reader), 2000);
+  const frame = JSON.parse(chunk.split("data: ")[1].split("\n")[0]);
+  assert.equal(frame.method, "notifications/endpoint_message");
+  assert.equal(frame.params.notification_id, receipt.id);
+  assert.equal(frame.params.endpoint_id, registered.endpoint_id);
+  assert.equal(frame.params.label, "sse");
+  assert.equal(frame.params.mode, "run");
+  assert.equal(frame.params.body, "hello agent");
+  assert.equal(frame.params._meta.pie_dedup_key, receipt.id);
+  await reader.cancel();
+});
+
 async function registerUser(app, username, { namespace, password } = {}) {
   const response = await app.fetch(
     new Request(`${BASE}/auth/register`, {

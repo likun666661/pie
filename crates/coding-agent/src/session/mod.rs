@@ -50,6 +50,29 @@ pub async fn trigger_sidecar_path_for_session(
     Ok(repo.root().join(format!("{session_id}.triggers.json")))
 }
 
+/// Public endpoint bindings are session-scoped sidecars, parallel to trigger sidecars.
+pub fn endpoint_sidecar_path(session_path: &std::path::Path) -> PathBuf {
+    session_path.with_extension("endpoints.json")
+}
+
+/// Return the endpoint-binding sidecar for a live session.
+#[allow(dead_code)] // wired into main.rs in Task 12
+pub async fn endpoint_sidecar_path_for_session(
+    session: &Session,
+    repo: &JsonlSessionRepo,
+) -> Result<PathBuf> {
+    let metadata = session.storage().get_metadata_json().await?;
+    if let Some(path) = metadata.get("path").and_then(|v| v.as_str()) {
+        return Ok(endpoint_sidecar_path(std::path::Path::new(path)));
+    }
+
+    let session_id = metadata
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown-session");
+    Ok(repo.root().join(format!("{session_id}.endpoints.json")))
+}
+
 /// Return the cron sidecar for a live session.
 pub async fn cron_sidecar_path_for_session(
     session: &Session,
@@ -170,6 +193,12 @@ pub async fn delete_by_id(repo: &JsonlSessionRepo, id: &str) -> Result<PathBuf> 
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e).with_context(|| format!("delete {}", cron_sidecar.display())),
+    }
+    let endpoint_sidecar = endpoint_sidecar_path(&path);
+    match tokio::fs::remove_file(&endpoint_sidecar).await {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e).with_context(|| format!("delete {}", endpoint_sidecar.display())),
     }
     Ok(path)
 }
@@ -364,6 +393,39 @@ mod tests {
             !second_path.exists(),
             "a new session must not inherit another session's cron sidecar"
         );
+    }
+
+    #[test]
+    fn endpoint_sidecar_path_lives_next_to_session_file() {
+        let path = std::path::Path::new("/tmp/session-id.jsonl");
+        assert_eq!(
+            endpoint_sidecar_path(path),
+            std::path::PathBuf::from("/tmp/session-id.endpoints.json")
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_removes_endpoint_sidecar() {
+        let dir = tempdir().unwrap();
+        let repo = JsonlSessionRepo::new(dir.path());
+        let session = repo.create("/cwd").await.unwrap();
+        let id = session
+            .storage()
+            .get_metadata_json()
+            .await
+            .unwrap()
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .to_string();
+        let session_path = repo.list().await.unwrap().pop().unwrap();
+        let endpoint_path = endpoint_sidecar_path(&session_path);
+        std::fs::write(&endpoint_path, "{\"version\":1,\"endpoints\":[]}").unwrap();
+
+        let deleted = delete_by_id(&repo, &id).await.unwrap();
+
+        assert_eq!(deleted, session_path);
+        assert!(!endpoint_path.exists());
     }
 
     #[tokio::test]

@@ -197,11 +197,12 @@ pub fn should_compact(
         return false;
     }
     let window = context_window as u64;
-    let reserve = settings.reserve_tokens as u64;
-    if reserve >= window {
-        return true;
-    }
-    context_tokens > window - reserve
+    // Trigger auto-compaction at 80% of the context window so there's still
+    // headroom for the summarizer LLM call and the next turn. Waiting until
+    // `window - reserve_tokens` (≈87%+ with defaults) meant the next response
+    // could overflow the window before compaction had a chance to run.
+    let threshold = (window * 4) / 5;
+    context_tokens > threshold
 }
 
 // ──────────────────────────────────────────────────────────────────────────────────────────
@@ -546,8 +547,12 @@ mod tests {
             reserve_tokens: 1024,
             keep_recent_tokens: 0,
         };
-        // Threshold is window - reserve = 126_976.
+        // Threshold is 80% of window = 102_400 for a 128K window.
+        assert!(should_compact(102_401, 128_000, &s));
+        assert!(!should_compact(102_400, 128_000, &s));
+        // Also triggers at higher usage.
         assert!(should_compact(127_000, 128_000, &s));
+        // Well below threshold does not trigger.
         assert!(!should_compact(80_000, 128_000, &s));
     }
 

@@ -118,8 +118,6 @@ pub async fn load_all(cwd: &Path) -> LoadedMcp {
             }
         }
     }
-    add_built_in_hub_if_ready(&mut configs);
-
     let inject_summary_servers: std::collections::HashSet<String> = configs
         .iter()
         .filter(|c| c.inject_summary)
@@ -170,29 +168,6 @@ fn built_in_hub_server() -> ServerConfig {
 pub async fn connect_built_in_hub_notification_hook() -> Result<Arc<McpNotificationHook>> {
     let (_tools, hook) = connect_one(&built_in_hub_server()).await?;
     Ok(hook)
-}
-
-fn add_built_in_hub_if_ready(configs: &mut Vec<ServerConfig>) {
-    let store = AuthStore::load().ok();
-    add_built_in_hub_if_ready_from_store(configs, store.as_ref());
-}
-
-fn add_built_in_hub_if_ready_from_store(
-    configs: &mut Vec<ServerConfig>,
-    store: Option<&AuthStore>,
-) {
-    if configs
-        .iter()
-        .any(|server| server.name == BUILT_IN_HUB_SERVER_NAME)
-    {
-        return;
-    }
-    if store
-        .and_then(|store| store.resolve_for_provider(BUILT_IN_HUB_TOKEN_REF))
-        .is_some()
-    {
-        configs.push(built_in_hub_server());
-    }
 }
 
 #[cfg(test)]
@@ -345,7 +320,6 @@ async fn connect_stdio(s: &ServerConfig) -> Result<Arc<McpClient>> {
 }
 
 async fn connect_streamable_http(s: &ServerConfig) -> Result<Arc<McpClient>> {
-    validate_official_hub_scope(s)?;
     if s.command.is_some() || !s.args.is_empty() {
         anyhow::bail!(
             "streamable_http MCP server '{}' must set endpoint, not command/args",
@@ -403,30 +377,6 @@ async fn connect_streamable_http(s: &ServerConfig) -> Result<Arc<McpClient>> {
     Ok(Arc::new(McpClient::new(Arc::new(transport))))
 }
 
-fn validate_official_hub_scope(s: &ServerConfig) -> Result<()> {
-    let uses_official_name = s.name == BUILT_IN_HUB_SERVER_NAME;
-    let uses_official_endpoint = s.endpoint.as_deref().is_some_and(is_official_hub_endpoint);
-    let uses_official_credential = s.auth.as_ref().is_some_and(|auth| {
-        auth.kind == "bearer" && auth.token_keychain_ref.as_deref() == Some(BUILT_IN_HUB_TOKEN_REF)
-    });
-    if !uses_official_name && !uses_official_credential {
-        return Ok(());
-    }
-    if !uses_official_name || !uses_official_endpoint || !uses_official_credential {
-        anyhow::bail!(
-            "official pie-hub MCP credential is reserved for pie.0xfefe.me; custom or staging hubs must use a different server name and credential"
-        );
-    }
-    Ok(())
-}
-
-fn is_official_hub_endpoint(endpoint: &str) -> bool {
-    endpoint == BUILT_IN_HUB_ENDPOINT
-        || test_built_in_hub_endpoint()
-            .as_deref()
-            .is_some_and(|test_endpoint| endpoint == test_endpoint)
-}
-
 fn resolve_http_auth(auth: Option<&HttpAuthConfig>) -> Result<HttpMcpAuth> {
     let Some(auth_cfg) = auth else {
         return Ok(HttpMcpAuth::None);
@@ -459,11 +409,8 @@ fn resolve_http_auth_from_store(
 }
 
 fn http_auth_recovery(auth: &HttpAuthConfig) -> &'static str {
-    if auth.token_keychain_ref.as_deref() == Some(BUILT_IN_HUB_TOKEN_REF) {
-        "run /hub join"
-    } else {
-        "run /login <configured-token-ref>"
-    }
+    let _ = auth;
+    "run /login <configured-token-ref>"
 }
 
 #[cfg(test)]
@@ -545,10 +492,10 @@ mod tests {
         let cfg: McpConfig = toml::from_str(
             r#"
 [[server]]
-name = "pie-hub"
+name = "remote-docs"
 kind = "streamable_http"
-endpoint = "https://pie.0xfefe.me/mcp"
-auth = { kind = "bearer", token_keychain_ref = "pie-hub:default" }
+endpoint = "https://mcp.example.com/mcp"
+auth = { kind = "bearer", token_keychain_ref = "mcp-example:default" }
 request_timeout_ms = 30000
 sse_idle_timeout_ms = 60000
 body_cap_bytes = 1048576
@@ -557,150 +504,72 @@ body_cap_bytes = 1048576
         .unwrap();
         assert_eq!(cfg.server.len(), 1);
         let server = &cfg.server[0];
-        assert_eq!(server.name, "pie-hub");
+        assert_eq!(server.name, "remote-docs");
         assert_eq!(server.kind, ServerKind::StreamableHttp);
         assert_eq!(
             server.endpoint.as_deref(),
-            Some("https://pie.0xfefe.me/mcp")
+            Some("https://mcp.example.com/mcp")
         );
         assert_eq!(
             server
                 .auth
                 .as_ref()
                 .and_then(|auth| auth.token_keychain_ref.as_deref()),
-            Some("pie-hub:default")
+            Some("mcp-example:default")
         );
     }
 
-    #[test]
-    fn built_in_hub_added_only_after_credential_exists() {
-        let mut configs = Vec::new();
-        let mut store = crate::auth::AuthStore::default();
-        add_built_in_hub_if_ready_from_store(&mut configs, Some(&store));
-        assert!(
-            configs.is_empty(),
-            "clean installs should not emit a missing-token startup diagnostic"
-        );
-
-        store.set(
-            BUILT_IN_HUB_TOKEN_REF,
-            crate::auth::ProviderCredential::ApiKey {
-                value: "hub_agent_test_token_should_not_leak".into(),
-            },
-        );
-
-        add_built_in_hub_if_ready_from_store(&mut configs, Some(&store));
-        assert_eq!(configs.len(), 1);
-        let server = &configs[0];
-        assert_eq!(server.name, BUILT_IN_HUB_SERVER_NAME);
-        assert_eq!(server.kind, ServerKind::StreamableHttp);
-        assert_eq!(server.endpoint.as_deref(), Some(BUILT_IN_HUB_ENDPOINT));
-        assert_eq!(
-            server
-                .auth
-                .as_ref()
-                .and_then(|auth| auth.token_keychain_ref.as_deref()),
-            Some(BUILT_IN_HUB_TOKEN_REF)
-        );
+    struct EnvGuard {
+        key: &'static str,
+        original: Option<std::ffi::OsString>,
     }
 
-    #[test]
-    fn official_hub_config_prevents_built_in_duplicate() {
-        let mut store = crate::auth::AuthStore::default();
-        store.set(
-            BUILT_IN_HUB_TOKEN_REF,
-            crate::auth::ProviderCredential::ApiKey {
-                value: "hub_agent_test_token_should_not_leak".into(),
-            },
-        );
+    impl EnvGuard {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let original = std::env::var_os(key);
+            unsafe { std::env::set_var(key, value) };
+            Self { key, original }
+        }
+    }
 
-        let mut configs = vec![ServerConfig {
-            name: BUILT_IN_HUB_SERVER_NAME.into(),
-            kind: ServerKind::StreamableHttp,
-            command: None,
-            args: Vec::new(),
-            endpoint: Some(BUILT_IN_HUB_ENDPOINT.into()),
-            auth: Some(HttpAuthConfig {
-                kind: "bearer".into(),
-                token_keychain_ref: Some(BUILT_IN_HUB_TOKEN_REF.into()),
-            }),
-            request_timeout_ms: None,
-            sse_idle_timeout_ms: None,
-            body_cap_bytes: None,
-            reconnect: None,
-            inject_summary: false,
-            inject_and_run: false,
-        }];
-        add_built_in_hub_if_ready_from_store(&mut configs, Some(&store));
-        assert_eq!(configs.len(), 1);
-        assert_eq!(configs[0].endpoint.as_deref(), Some(BUILT_IN_HUB_ENDPOINT));
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match self.original.take() {
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
     }
 
     #[tokio::test]
-    async fn official_hub_scope_rejects_custom_endpoint_or_credential_scope() {
-        let staging = ServerConfig {
-            name: BUILT_IN_HUB_SERVER_NAME.into(),
-            kind: ServerKind::StreamableHttp,
-            command: None,
-            args: Vec::new(),
-            endpoint: Some("https://staging.0xfefe.me/mcp".into()),
-            auth: Some(HttpAuthConfig {
-                kind: "bearer".into(),
-                token_keychain_ref: Some(BUILT_IN_HUB_TOKEN_REF.into()),
-            }),
-            request_timeout_ms: None,
-            sse_idle_timeout_ms: None,
-            body_cap_bytes: None,
-            reconnect: None,
-            inject_summary: false,
-            inject_and_run: false,
-        };
-        let err = match connect_streamable_http(&staging).await {
-            Ok(_) => panic!("staging endpoint cannot reuse official pie-hub scope"),
-            Err(err) => err.to_string(),
-        };
-        assert!(
-            err.contains("custom or staging hubs must use a different server name"),
-            "{err}"
-        );
-        assert!(!err.contains(BUILT_IN_HUB_TOKEN_REF), "{err}");
+    async fn stored_hub_credential_does_not_create_implicit_server() {
+        let _env_lock = crate::auth::ENV_LOCK.lock().unwrap();
+        let temp = tempfile::TempDir::new().unwrap();
+        let _pie_dir = EnvGuard::set("PIE_DIR", temp.path());
 
-        let wrong_credential = ServerConfig {
-            endpoint: Some(BUILT_IN_HUB_ENDPOINT.into()),
-            auth: Some(HttpAuthConfig {
-                kind: "bearer".into(),
-                token_keychain_ref: Some("pie-hub-staging:default".into()),
-            }),
-            ..staging
-        };
-        let err = match connect_streamable_http(&wrong_credential).await {
-            Ok(_) => panic!("official endpoint cannot reuse pie-hub name with another credential"),
-            Err(err) => err.to_string(),
-        };
-        assert!(
-            err.contains("custom or staging hubs must use a different server name"),
-            "{err}"
+        let mut store = crate::auth::AuthStore::default();
+        store.set(
+            BUILT_IN_HUB_TOKEN_REF,
+            crate::auth::ProviderCredential::ApiKey {
+                value: "hub_agent_test_token_should_not_leak".into(),
+            },
         );
-        assert!(!err.contains("pie-hub-staging:default"), "{err}");
+        store.save().unwrap();
 
-        let custom_name_with_official_credential = ServerConfig {
-            name: "pie-hub-staging".into(),
-            endpoint: Some("https://staging.0xfefe.me/mcp".into()),
-            auth: Some(HttpAuthConfig {
-                kind: "bearer".into(),
-                token_keychain_ref: Some(BUILT_IN_HUB_TOKEN_REF.into()),
-            }),
-            ..wrong_credential
-        };
-        let err = match connect_streamable_http(&custom_name_with_official_credential).await {
-            Ok(_) => panic!("custom server cannot use official pie-hub credential"),
-            Err(err) => err.to_string(),
-        };
+        let cwd = temp.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let loaded = load_all(&cwd).await;
+        assert!(loaded.diagnostics.is_empty(), "{:?}", loaded.diagnostics);
+        assert_eq!(loaded.client_count, 0);
+        assert!(loaded.server_names.is_empty());
         assert!(
-            err.contains("custom or staging hubs must use a different server name"),
-            "{err}"
+            loaded.tools.is_empty(),
+            "stored credentials must not implicitly add MCP tools"
         );
-        assert!(!err.contains(BUILT_IN_HUB_TOKEN_REF), "{err}");
+        assert!(
+            loaded.notification_hooks.is_empty(),
+            "stored credentials must not implicitly add MCP notification hooks"
+        );
     }
 
     #[tokio::test]
@@ -710,7 +579,7 @@ body_cap_bytes = 1048576
             kind: ServerKind::StreamableHttp,
             command: Some("node".into()),
             args: vec!["server.js".into()],
-            endpoint: Some("https://pie.0xfefe.me/mcp".into()),
+            endpoint: Some("https://mcp.example.com/mcp".into()),
             auth: None,
             request_timeout_ms: None,
             sse_idle_timeout_ms: None,
@@ -732,10 +601,10 @@ body_cap_bytes = 1048576
 
     #[test]
     fn streamable_http_auth_resolves_from_auth_store_without_debug_leak() {
-        let token = "hub_agent_should_not_leak";
+        let token = "mcp_token_should_not_leak";
         let mut store = crate::auth::AuthStore::default();
         store.set(
-            "pie-hub:default",
+            "remote-docs:default",
             crate::auth::ProviderCredential::ApiKey {
                 value: token.into(),
             },
@@ -744,7 +613,7 @@ body_cap_bytes = 1048576
         let auth = resolve_http_auth_from_store(
             Some(&HttpAuthConfig {
                 kind: "bearer".into(),
-                token_keychain_ref: Some("pie-hub:default".into()),
+                token_keychain_ref: Some("remote-docs:default".into()),
             }),
             &store,
         )

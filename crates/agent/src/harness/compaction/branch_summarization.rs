@@ -44,6 +44,8 @@ pub async fn summarize_branch(
             model,
             messages,
             custom_instructions: Some(BRANCH_SUMMARY_INSTRUCTIONS.to_string()),
+            prompt_budget_tokens: None,
+            max_output_tokens: None,
             stream_fn,
         },
         cancel,

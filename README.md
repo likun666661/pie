@@ -18,6 +18,10 @@ pie keeps its request stream byte-exact for DS4's prefix cache (reasoning replay
 transparent 409 recovery, honest cache accounting), so long local-model sessions prefill
 only what's new instead of the whole conversation every turn.
 
+**Architecture notes: [Rive code-reading manual](docs/rive-code-reading/).**
+This folder contains the Rive-generated coarse read, deep read, teaching manual,
+and workflow prompts used to analyze pie's runtime architecture.
+
 ## Install / build
 
 ```bash
